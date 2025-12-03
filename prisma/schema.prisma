@@ -1,0 +1,67 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Wager {
+  id             String   @id         // same as your Date.now().toString()
+
+  chatId         String
+  messageId      Int?
+
+  text           String
+  assetSymbol    String
+  assetId        String?
+  operator       String
+  threshold      Float
+
+  createdAt      DateTime @default(now())
+  voteDeadline   DateTime
+  resolutionTime DateTime
+
+  resolved       Boolean  @default(false)
+  finalPrice     Float?
+  outcomeYes     Boolean?
+  
+  votes          WagerVote[]
+}
+
+model WagerVote {
+  id        Int      @id @default(autoincrement())
+
+  wagerId   String
+  userId    String
+  name      String
+  side      String   // "yes" or "no"
+
+  createdAt DateTime @default(now())
+
+  wager     Wager    @relation(fields: [wagerId], references: [id])
+
+  @@unique([wagerId, userId], name: "wagerId_userId")
+}
+
+model LeaderboardScore {
+  id         String   @id @default(cuid())
+  chatId     String
+  userId     String
+  scope      String   // "all" or "month"
+  monthKey   String?  // null for all-time
+  name       String
+
+  wins       Int      @default(0)
+  losses     Int      @default(0)
+  total      Int      @default(0)
+  powerScore Float    @default(0)
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([chatId, userId, scope, monthKey], name: "chat_user_scope_month_unique")
+}
