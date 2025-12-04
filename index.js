@@ -214,46 +214,50 @@ async function updateLeaderboardRow({
     monthKey: scope === 'all' ? 'ALL' : monthKey,
   };
 
-  const existing = await prisma.leaderboardScore.findUnique({
-    where: {
-      chat_user_scope_month_unique: compositeKey,
-    },
-  });
-
-  let wins = existing?.wins ?? 0;
-  let losses = existing?.losses ?? 0;
-
-  wins += winDelta;
-  losses += lossDelta;
-
-  const total = wins + losses;
-  const winRate = total > 0 ? wins / total : 0;
-  const powerScore = total > 0 ? winRate * 100 * Math.sqrt(total) : 0;
-
-  if (existing) {
-    await prisma.leaderboardScore.update({
+  try {
+    const existing = await prisma.leaderboardScore.findUnique({
       where: {
         chat_user_scope_month_unique: compositeKey,
       },
-      data: {
-        name,
-        wins,
-        losses,
-        total,
-        powerScore,
-      },
     });
-  } else {
-    await prisma.leaderboardScore.create({
-      data: {
-        ...compositeKey,
-        name,
-        wins,
-        losses,
-        total,
-        powerScore,
-      },
-    });
+
+    let wins = existing?.wins ?? 0;
+    let losses = existing?.losses ?? 0;
+
+    wins += winDelta;
+    losses += lossDelta;
+
+    const total = wins + losses;
+    const winRate = total > 0 ? wins / total : 0;
+    const powerScore = total > 0 ? winRate * 100 * Math.sqrt(total) : 0;
+
+    if (existing) {
+      await prisma.leaderboardScore.update({
+        where: {
+          chat_user_scope_month_unique: compositeKey,
+        },
+        data: {
+          name,
+          wins,
+          losses,
+          total,
+          powerScore,
+        },
+      });
+    } else {
+      await prisma.leaderboardScore.create({
+        data: {
+          ...compositeKey,
+          name,
+          wins,
+          losses,
+          total,
+          powerScore,
+        },
+      });
+    }
+  } catch (err) {
+    console.error('Failed to update leaderboard row:', err.message || err);
   }
 }
 
@@ -640,25 +644,30 @@ bot.command('wager', async (ctx) => {
   wagers.set(id, wager);
   scheduleSave(); // JSON backup (for now)
 
-  // ---- Persist wager to Postgres ----
-  await prisma.wager.create({
-    data: {
-      id,
-      chatId: String(ctx.chat.id),
-      messageId: null,
-      text: rawCondition,
-      assetSymbol: condition.assetSymbol,
-      assetId: condition.assetId,
-      operator: condition.operator,
-      threshold: condition.threshold,
-      createdAt: now,
-      voteDeadline,
-      resolutionTime,
-      resolved: false,
-      finalPrice: null,
-      outcomeYes: null,
-    },
-  });
+  // ---- Persist wager to Postgres (best-effort) ----
+  try {
+    await prisma.wager.create({
+      data: {
+        id,
+        chatId: String(ctx.chat.id),
+        messageId: null,
+        text: rawCondition,
+        assetSymbol: condition.assetSymbol,
+        assetId: condition.assetId,
+        operator: condition.operator,
+        threshold: condition.threshold,
+        createdAt: now,
+        voteDeadline,
+        resolutionTime,
+        resolved: false,
+        finalPrice: null,
+        outcomeYes: null,
+      },
+    });
+  } catch (err) {
+    console.error('Failed to persist wager to Postgres:', err.message || err);
+  }
+
 
   // Send initial Telegram message
   const initialText = buildWagerText(wager, now);
@@ -678,10 +687,15 @@ bot.command('wager', async (ctx) => {
   scheduleSave(); // messageID matters after restart
 
   // ---- Update messageId in DB once we know it ----
-  await prisma.wager.update({
-    where: { id },
-    data: { messageId: message.message_id },
-  });
+  try {
+    await prisma.wager.update({
+      where: { id },
+      data: { messageId: message.message_id },
+    });
+  } catch (err) {
+    console.error('Failed to update wager.messageId in Postgres:', err.message || err);
+  }
+
 
   // Countdown updater (5s ticks) – ONLY place that edits the message
   wager.countdownIntervalId = setInterval(async () => {
@@ -775,24 +789,29 @@ bot.on('callback_query', async (ctx) => {
   scheduleSave(); // persist vote + participant name
 
   // ---- Persist vote to Postgres (one row per user per wager) ----
-  await prisma.wagerVote.upsert({
-    where: {
-      wagerId_userId: {
+  try {
+    await prisma.wagerVote.upsert({
+      where: {
+        wagerId_userId: {
+          wagerId: id,
+          userId: String(userId),
+        },
+      },
+      update: {
+        side,
+        name,
+      },
+      create: {
         wagerId: id,
         userId: String(userId),
+        name,
+        side,
       },
-    },
-    update: {
-      side,
-      name,
-    },
-    create: {
-      wagerId: id,
-      userId: String(userId),
-      name,
-      side,
-    },
-  });
+    });
+  } catch (err) {
+    console.error('Failed to persist wager vote to Postgres:', err.message || err);
+  }
+
 
 
   // No message edit here – countdown loop will pick up new counts
@@ -915,15 +934,20 @@ async function resolveDueWagers() {
       const resultText = buildResolvedText(wager);
       scheduleSave(); // persist resolved wager + leaderboard updates
 
-      // ---- Persist resolution to Postgres ----
-      await prisma.wager.update({
-        where: { id },
-        data: {
-          resolved: true,
-          finalPrice: price,
-          outcomeYes: yesWins,
-        },
-      });
+      // ---- Persist resolution to Postgres (best-effort) ----
+      try {
+        await prisma.wager.update({
+          where: { id },
+          data: {
+            resolved: true,
+            finalPrice: price,
+            outcomeYes: yesWins,
+          },
+        });
+      } catch (err) {
+        console.error('Failed to persist wager resolution to Postgres:', err.message || err);
+      }
+
 
 
       // First try to edit the original wager message
