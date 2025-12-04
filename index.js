@@ -479,6 +479,7 @@ bot.command('leaderboard', (ctx) => {
 // WagerHelp Instructions
 bot.command('wagerhelp', (ctx) => {
   ctx.reply(
+    'DIVI Wager Bot allows you to create friendly prediction wagers in Telegram groups.\n\n' +
     'How to create a wager:\n\n' +
       'Basic format:\n' +
       '/wager SYMBOL OPERATOR VALUE | TIME\n\n' +
