@@ -409,6 +409,67 @@ function buildResolvedText(wager) {
   );
 }
 
+// Start or restart the countdown timer for a wager 
+function startCountdown(wager) {
+  
+  // Clear any existing timer just in case
+  if (wager.countdownIntervalId) {
+    clearInterval(wager.countdownIntervalId);
+    wager.countdownIntervalId = null;
+  }
+
+  const id = wager.id;
+
+  wager.countdownIntervalId = setInterval(async () => {
+    const current = new Date();
+    const stored = wagers.get(id);
+
+    // If wager disappeared from memory, stop the timer
+    if (!stored) {
+      clearInterval(wager.countdownIntervalId);
+      wager.countdownIntervalId = null;
+      return;
+    }
+
+    const remainingMs = stored.voteDeadline.getTime() - current.getTime();
+    const done = remainingMs <= 0;
+    const newText = buildWagerText(stored, current);
+
+    try {
+      await bot.telegram.editMessageText(
+        stored.chatId,
+        stored.messageId,
+        undefined,
+        newText,
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '👍 YES', callback_data: `join:yes:${id}` },
+                { text: '👎 NO', callback_data: `join:no:${id}` },
+              ],
+            ],
+          },
+        }
+      );
+    } catch (err) {
+      console.error('Failed to edit message:', err.description || err.message);
+      if (
+        err.response &&
+        (err.response.error_code === 400 || err.response.error_code === 403)
+      ) {
+        clearInterval(stored.countdownIntervalId);
+        stored.countdownIntervalId = null;
+      }
+    }
+
+    if (done) {
+      clearInterval(stored.countdownIntervalId);
+      stored.countdownIntervalId = null;
+    }
+  }, 5000); // 5s to avoid rate limits
+}
+
 // Fetch current USD price from CoinGecko for a given coin ID (e.g. 'bitcoin')
 async function getCurrentPriceUsd(coinId) {
   if (!coinId) throw new Error('No coinId configured for this symbol');
@@ -438,7 +499,7 @@ bot.start((ctx) => {
       'Create a wager like:\n' +
       '/wager BTC > 100000 | 2025-12-31 00:00\n' +
       '- Times are in UTC\n' +
-      '- Resolution must be at least 1 hour from now\n' +
+      '- Resolution must be at least 10 minutes from now\n' +
       '- Voting window is 60 seconds after creation'
   );
 });
@@ -507,12 +568,12 @@ bot.command('wagerhelp', (ctx) => {
       '• hours: h, hr, hrs, hour, hours\n' +
       '• days: d, day, days\n\n' +
       'Rules:\n' +
-      '• Resolution must be at least 1 hour from now\n' +
+      '• Resolution must be at least 10 minutes from now\n' +
       '• Prices for wager resolution come from CoinGecko\n' +
       '• Voting stays open for 60 seconds after creation\n' +
       '• Winners and losers are displayed automatically at resolution\n\n' +
       'Tip: Type /Leaderboard to see the top winners 🐐.\n' +
-      '🏆 Winners receive +10 pts per win.'
+      '🏆 Rankings are based on win rate and total wagers — consistency matters.'
   );
 });
 
@@ -532,7 +593,7 @@ bot.command('wager', async (ctx) => {
   const text = ctx.message.text || '';
   const withoutCommand = text.replace(/^\/wager(@\w+)?\s*/, '').trim();
 
-  // Developer override: allow "--debug" to bypass 1 hour rule
+  // Developer override: allow "--debug" to bypass the minimum resolution time
   const isDebug = withoutCommand.includes('--debug') && ctx.from.id === ADMIN_USER_ID;
 
   // Remove --debug from the input so parsing stays clean
@@ -549,7 +610,7 @@ bot.command('wager', async (ctx) => {
         '/wager BTC >= 90000 | in 2 hours\n' +
         '/wager ETH < 3000 | in 90 minutes\n\n' +
         'Rules:\n' +
-        '• Resolution must be at least 1 hour from now\n' +
+        '• Resolution must be at least 10 minutes from now\n' +
         '• Prices for wager resolution come from CoinGecko\n' +
         '• Voting stays open for 60 seconds after creation\n\n' +
         'Tip: You can also type /wagerhelp for the full instructions.'
@@ -601,12 +662,12 @@ bot.command('wager', async (ctx) => {
 
   const diffMs = resolutionTime.getTime() - now.getTime();
 
-  // Enforce minimum 1 hour from now (except in debug mode)
-  const oneHourMs = 60 * 60 * 1000;
-  if (!isDebug && diffMs < oneHourMs) {
+  // Enforce minimum 10 minutes from now (except in debug mode)
+  const minResolutionMs = 10 * 60 * 1000; // 10 minutes
+  if (!isDebug && diffMs < minResolutionMs) {
     const mins = Math.floor(diffMs / 60000);
     return ctx.reply(
-      'Resolution time must be at least 1 hour from now.\n' +
+      'Resolution time must be at least 10 minutes from now.\n' +
         `You provided a time that is only about ${mins} minute(s) away.`
     );
   }
@@ -697,53 +758,126 @@ bot.command('wager', async (ctx) => {
   }
 
 
-  // Countdown updater (5s ticks) – ONLY place that edits the message
-  wager.countdownIntervalId = setInterval(async () => {
-    const current = new Date();
-    const stored = wagers.get(id);
-    if (!stored) {
-      clearInterval(wager.countdownIntervalId);
-      return;
+  // Start the countdown updater for this wager
+  startCountdown(wager);
+});
+
+async function rebuildActiveWagersFromDb({ graceHours = 24 } = {}) {
+  const now = new Date();
+  const graceStart = new Date(now.getTime() - graceHours * 60 * 60 * 1000);
+
+  console.log(
+    `Rebuilding active wagers from DB (resolved = false, resolutionTime >= ${graceStart.toISOString()})`
+  );
+
+  // Clear any existing in-memory wagers
+  wagers.clear();
+
+  let dbWagers;
+  try {
+    dbWagers = await prisma.wager.findMany({
+      where: {
+        resolved: false,
+        resolutionTime: { gte: graceStart },
+      },
+    });
+  } catch (err) {
+    console.error(
+      'Failed to load unresolved wagers from Postgres:',
+      err.message || err
+    );
+    return;
+  }
+
+  if (dbWagers.length === 0) {
+    console.log('No unresolved wagers found in DB for rebuild.');
+    return;
+  }
+
+  // Load all votes for these wagers in a single query
+  const wagerIds = dbWagers.map((w) => w.id);
+
+  let dbVotes;
+  try {
+    dbVotes = await prisma.wagerVote.findMany({
+      where: {
+        wagerId: { in: wagerIds },
+      },
+    });
+  } catch (err) {
+    console.error(
+      'Failed to load wager votes from Postgres:',
+      err.message || err
+    );
+    dbVotes = [];
+  }
+
+  const votesByWagerId = new Map();
+  for (const v of dbVotes) {
+    if (!votesByWagerId.has(v.wagerId)) {
+      votesByWagerId.set(v.wagerId, []);
     }
+    votesByWagerId.get(v.wagerId).push(v);
+  }
 
-    const remainingMs = stored.voteDeadline.getTime() - current.getTime();
-    const done = remainingMs <= 0;
-    const newText = buildWagerText(stored, current);
+  for (const dbW of dbWagers) {
+    const yes = new Set();
+    const no = new Set();
+    const participantNames = new Map();
 
-    try {
-      await bot.telegram.editMessageText(
-        stored.chatId,
-        stored.messageId,
-        undefined,
-        newText,
-        {
-          reply_markup: {
-            inline_keyboard: [
-              [
-                { text: '👍 YES', callback_data: `join:yes:${id}` },
-                { text: '👎 NO', callback_data: `join:no:${id}` },
-              ],
-            ],
-          },
-        }
-      );
-    } catch (err) {
-      console.error('Failed to edit message:', err.description || err.message);
-      if (
-        err.response &&
-        (err.response.error_code === 400 || err.response.error_code === 403)
-      ) {
-        clearInterval(stored.countdownIntervalId);
-        stored.countdownIntervalId = null;
+    const votesForThis = votesByWagerId.get(dbW.id) || [];
+
+    for (const v of votesForThis) {
+      // Convert userId back to number if possible, to match your existing in-memory usage
+      const userIdNum = Number(v.userId);
+      const uid = Number.isNaN(userIdNum) ? v.userId : userIdNum;
+
+      if (v.side === 'yes') {
+        yes.add(uid);
+      } else if (v.side === 'no') {
+        no.add(uid);
+      }
+
+      if (v.name) {
+        participantNames.set(uid, v.name);
       }
     }
 
-    if (done) {
-      clearInterval(stored.countdownIntervalId);
-      stored.countdownIntervalId = null;
+    const wager = {
+      id: dbW.id,
+      text: dbW.text,
+      assetSymbol: dbW.assetSymbol,
+      assetId: dbW.assetId,
+      operator: dbW.operator,
+      threshold: dbW.threshold,
+      yes,
+      no,
+      participantNames,
+      chatId: Number(dbW.chatId) || dbW.chatId,
+      messageId: dbW.messageId,
+      createdAt: dbW.createdAt,
+      resolutionTime: dbW.resolutionTime,
+      voteDeadline: dbW.voteDeadline,
+      countdownIntervalId: null,
+      resolved: dbW.resolved,
+      finalPrice: dbW.finalPrice,
+      outcomeYes: dbW.outcomeYes,
+      // winners/losers will be filled at resolution time
+      winners: [],
+      losers: [],
+    };
+
+    wagers.set(wager.id, wager);
+
+    // If voting is still open, restart the countdown
+    if (now < wager.voteDeadline) {
+      startCountdown(wager);
     }
-  }, 5000); // 5s to avoid rate limits
-});
+  }
+
+  console.log(`Rebuilt ${wagers.size} active wagers from DB.`);
+}
+
 
 // Handle button clicks
 bot.on('callback_query', async (ctx) => {
@@ -1001,18 +1135,21 @@ async function resolveDueWagers() {
 
 /* ----------------- Launch bot ----------------- */
 
-// Run resolver every 60 seconds
-setInterval(resolveDueWagers, 60 * 1000);
-
-await loadState();
+// Rebuild in-memory active wagers from Postgres (last 24h unresolved)
+await rebuildActiveWagersFromDb({ graceHours: 24 });
 
 // Startup Banner
 console.log('Bot starting. PID:', process.pid, 'at', new Date().toISOString());
 
 bot.launch();
 
+// One-time catch-up on startup for any overdue wagers
 console.log('Boot catch-up run at', new Date().toISOString());
-resolveDueWagers(); // one-time catch-up on startup
+await resolveDueWagers();
+
+// Run resolver every 60 seconds
+setInterval(resolveDueWagers, 60 * 1000);
+
 
 process.once('SIGINT', async () => {
   await prisma.$disconnect();
