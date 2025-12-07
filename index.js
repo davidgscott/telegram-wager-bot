@@ -504,41 +504,72 @@ bot.start((ctx) => {
   );
 });
 
-bot.command('leaderboard', (ctx) => {
-  const chatId = ctx.chat.id;
+bot.command('leaderboard', async (ctx) => {
+  const chatIdStr = String(ctx.chat.id);
   const text = ctx.message.text || '';
   const arg = text.replace(/^\/leaderboard(@\w+)?\s*/, '').trim().toLowerCase();
 
-  const allTimeScores = getAllTimeScores(chatId);
   const thisMonthKey = getMonthKey(new Date());
-  const thisMonthScores = getMonthlyScores(chatId, thisMonthKey);
 
-  function renderTop(scoresMap) {
-    const sorted = [...scoresMap.entries()]
-      .map(([uid, data]) => ({ uid, ...data }))
-      .sort((a, b) => b.points - a.points)
-      .slice(0, 10);
+  async function fetchTop(scope, monthKey) {
+    const where = {
+      chatId: chatIdStr,
+      scope,
+      monthKey: scope === 'all' ? 'ALL' : monthKey,
+    };
 
-    if (sorted.length === 0) return 'No scores yet. Resolve a wager first.';
+    const rows = await prisma.leaderboardScore.findMany({
+      where,
+      orderBy: { powerScore: 'desc' }, // <-- sort by powerScore
+      take: 10,
+    });
 
-    return sorted
-      .map((u, i) => `${i + 1}. ${u.name} — ${u.points} pts`)
+    if (!rows.length) {
+      return 'No scores yet. Resolve a wager first.';
+    }
+
+    return rows
+      .map((row, i) => {
+        const ps = row.powerScore ?? 0;
+        const wins = row.wins ?? 0;
+        const losses = row.losses ?? 0;
+        return `${i + 1}. ${row.name} — PS ${ps.toFixed(1)} (W:${wins} L:${losses})`;
+      })
       .join('\n');
   }
 
-  if (arg === 'all') {
-    return ctx.reply(`🏆 All-time leaderboard:\n\n${renderTop(allTimeScores)}`);
-  }
+  try {
+    if (arg === 'all') {
+      const allTimeText = await fetchTop('all', 'ALL');
+      return ctx.reply(
+        `🏆 All-time leaderboard (by PowerScore):\n\n${allTimeText}\n\n` +
+        `Type /powerscore to see how PowerScore is calculated.`
+      );
+    }
 
-  if (arg === 'month' || arg === 'thismonth') {
-    return ctx.reply(`📅 This month (${thisMonthKey}) leaderboard:\n\n${renderTop(thisMonthScores)}`);
-  }
+    if (arg === 'month' || arg === 'thismonth') {
+      const monthText = await fetchTop('month', thisMonthKey);
+      return ctx.reply(
+        `📅 This month (${thisMonthKey}) leaderboard (by PowerScore):\n\n${monthText}\n\n` +
+        `Type /powerscore to see how PowerScore is calculated.`
+      );
+    }
 
-  // Default: show both
-  ctx.reply(
-    `🏆 All-time leaderboard:\n\n${renderTop(allTimeScores)}\n\n` +
-    `📅 This month (${thisMonthKey}) leaderboard:\n\n${renderTop(thisMonthScores)}`
-  );
+    // Default: show both
+    const [allTimeText, monthText] = await Promise.all([
+      fetchTop('all', 'ALL'),
+      fetchTop('month', thisMonthKey),
+    ]);
+
+    return ctx.reply(
+      `🏆 All-time leaderboard (by PowerScore):\n\n${allTimeText}\n\n` +
+      `📅 This month (${thisMonthKey}) leaderboard (by PowerScore):\n\n${monthText}\n\n` +
+      `Type /powerscore to see how PowerScore is calculated.`
+    );
+  } catch (err) {
+    console.error('Failed to load leaderboard from Postgres:', err.message || err);
+    return ctx.reply('Sorry, something went wrong loading the leaderboard. Try again in a moment.');
+  }
 });
 
 // WagerHelp Instructions
@@ -574,6 +605,23 @@ bot.command('wagerhelp', (ctx) => {
       '• Winners and losers are displayed automatically at resolution\n\n' +
       'Tip: Type /Leaderboard to see the top winners 🐐.\n' +
       '🏆 Rankings are based on win rate and total wagers — consistency matters.'
+  );
+});
+
+bot.command('powerscore', (ctx) => {
+  ctx.reply(
+    'PowerScore is the ranking metric used on the leaderboard.\n\n' +
+    'For each user:\n' +
+    '• wins = number of correct wagers\n' +
+    '• losses = number of incorrect wagers\n' +
+    '• total = wins + losses\n' +
+    '• winRate = total > 0 ? wins / total : 0\n' +
+    '• powerScore = winRate × 100 × √total\n\n' +
+    'This rewards both:\n' +
+    '• high win rate (accuracy), and\n' +
+    '• a meaningful number of wagers (volume).\n\n' +
+    'So a user who wins often with many wagers will outrank someone\n' +
+    'who has a perfect record on only a few wagers.'
   );
 });
 
@@ -703,7 +751,7 @@ bot.command('wager', async (ctx) => {
   };
 
   wagers.set(id, wager);
-  scheduleSave(); // JSON backup (for now)
+  // scheduleSave(); // JSON backup (for now)
 
   // ---- Persist wager to Postgres (best-effort) ----
   try {
@@ -745,7 +793,7 @@ bot.command('wager', async (ctx) => {
 
   // Store messageId in memory + JSON + DB
   wager.messageId = message.message_id;
-  scheduleSave(); // messageID matters after restart
+  // scheduleSave(); // messageID matters after restart
 
   // ---- Update messageId in DB once we know it ----
   try {
@@ -978,7 +1026,7 @@ bot.on('callback_query', async (ctx) => {
     return ctx.answerCbQuery('Unknown option.', { show_alert: true });
   }
 
-  scheduleSave(); // persist vote + participant name
+  // scheduleSave(); // persist vote + participant name
 
   // ---- Persist vote to Postgres (one row per user per wager) ----
   try {
@@ -1206,7 +1254,7 @@ async function resolveDueWagers() {
       // ---- end scoring ----
 
       const resultText = buildResolvedText(wager);
-      scheduleSave(); // keep JSON backup for now (leaderboards + any in-memory wagers)
+      // scheduleSave(); // keep JSON backup for now (leaderboards + any in-memory wagers)
 
       // ---- Persist resolution to Postgres (best-effort) ----
       try {
