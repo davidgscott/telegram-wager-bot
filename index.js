@@ -954,42 +954,124 @@ bot.on('callback_query', async (ctx) => {
 
 /* ----------------- Auto-resolution loop ----------------- */
 
-// Resolve wagers when resolutionTime has passed
+// Resolve wagers when resolutionTime has passed (DB-first)
 async function resolveDueWagers() {
   const now = new Date();
   console.log('Resolver tick at', now.toISOString());
 
-  for (const [id, wager] of wagers.entries()) {
-    if (wager.resolved) continue;
-    if (now < wager.resolutionTime) continue;
-    if (!wager.assetId) {
-      console.log('Skipping wager (no assetId):', id);
+  let dueWagers;
+  try {
+    dueWagers = await prisma.wager.findMany({
+      where: {
+        resolved: false,
+        resolutionTime: { lte: now },
+      },
+      include: {
+        votes: true,
+      },
+    });
+  } catch (err) {
+    console.error('Failed to load due wagers from Postgres:', err.message || err);
+    return;
+  }
+
+  if (!dueWagers.length) {
+    console.log('No due unresolved wagers found.');
+    return;
+  }
+
+  for (const dbW of dueWagers) {
+    if (!dbW.assetId) {
+      console.log('Skipping wager (no assetId):', dbW.id);
       continue;
     }
 
+    const chatId = Number(dbW.chatId) || dbW.chatId;
+
+    // Rebuild yes/no sets and participant names from DB votes
+    const yesSet = new Set();
+    const noSet = new Set();
+    const participantNames = new Map();
+
+    for (const v of dbW.votes) {
+      const userIdNum = Number(v.userId);
+      const uid = Number.isNaN(userIdNum) ? v.userId : userIdNum;
+
+      if (v.side === 'yes') yesSet.add(uid);
+      else if (v.side === 'no') noSet.add(uid);
+
+      if (v.name) {
+        participantNames.set(uid, v.name);
+      }
+    }
+
     try {
-      console.log('Attempting to resolve wager', id, 'for', wager.assetSymbol);
+      console.log('Attempting to resolve wager', dbW.id, 'for', dbW.assetSymbol);
 
-      const price = await getCurrentPriceUsd(wager.assetId);
-      console.log('Got price for', wager.assetSymbol, ':', price);
+      const price = await getCurrentPriceUsd(dbW.assetId);
+      console.log('Got price for', dbW.assetSymbol, ':', price);
 
-      const yesWins = evaluateCondition(price, wager.operator, wager.threshold);
+      const yesWins = evaluateCondition(price, dbW.operator, dbW.threshold);
 
+      // Use in-memory wager if present, otherwise a local object
+      const memWager = wagers.get(dbW.id);
+      const wager = memWager || {
+        id: dbW.id,
+        text: dbW.text,
+        assetSymbol: dbW.assetSymbol,
+        assetId: dbW.assetId,
+        operator: dbW.operator,
+        threshold: dbW.threshold,
+        yes: yesSet,
+        no: noSet,
+        participantNames,
+        chatId,
+        messageId: dbW.messageId,
+        createdAt: dbW.createdAt,
+        resolutionTime: dbW.resolutionTime,
+        voteDeadline: dbW.voteDeadline,
+        countdownIntervalId: null,
+        resolved: false,
+        finalPrice: null,
+        outcomeYes: null,
+        winners: [],
+        losers: [],
+      };
+
+      // Sync core fields from DB/votes into whichever object we use
+      wager.yes = yesSet;
+      wager.no = noSet;
+      wager.participantNames = participantNames;
       wager.resolved = true;
       wager.finalPrice = price;
       wager.outcomeYes = yesWins;
 
-      // Build winners/losers lists using stored names (with emojis)
-      const winnersSet = yesWins ? wager.yes : wager.no;
-      const losersSet  = yesWins ? wager.no  : wager.yes;
+      if (memWager && memWager !== wager) {
+        memWager.yes = yesSet;
+        memWager.no = noSet;
+        memWager.participantNames = participantNames;
+        memWager.resolved = true;
+        memWager.finalPrice = price;
+        memWager.outcomeYes = yesWins;
 
-      wager.winners = [...winnersSet].map(uid => {
-        const name = wager.participantNames.get(uid) || `User ${uid}`;
+        // Stop any countdown that might still be running
+        if (memWager.countdownIntervalId) {
+          clearInterval(memWager.countdownIntervalId);
+          memWager.countdownIntervalId = null;
+        }
+      }
+
+      // Build winners/losers lists for display
+      const winnersSet = yesWins ? yesSet : noSet;
+      const losersSet  = yesWins ? noSet  : yesSet;
+
+      wager.winners = [...winnersSet].map((uid) => {
+        const name = participantNames.get(uid) || `User ${uid}`;
         return `🏆 ${name}`;
       });
 
-      wager.losers = [...losersSet].map(uid => {
-        const name = wager.participantNames.get(uid) || `User ${uid}`;
+      wager.losers = [...losersSet].map((uid) => {
+        const name = participantNames.get(uid) || `User ${uid}`;
         return `😞 ${name}`;
       });
 
@@ -998,21 +1080,21 @@ async function resolveDueWagers() {
       wager.losers.sort((a, b) => a.localeCompare(b));
 
       // ---- Leaderboard scoring ----
-      const monthKey = getMonthKey(wager.resolutionTime);
-      const allTimeScores = getAllTimeScores(wager.chatId);
-      const monthlyScores = getMonthlyScores(wager.chatId, monthKey);
+      const monthKey = getMonthKey(dbW.resolutionTime);
+      const allTimeScores = getAllTimeScores(chatId);
+      const monthlyScores = getMonthlyScores(chatId, monthKey);
 
       // Winners: +10 in-memory, +1 win in DB
       for (const uid of winnersSet) {
-        const name = wager.participantNames.get(uid) || `User ${uid}`;
+        const name = participantNames.get(uid) || `User ${uid}`;
 
-        // existing in-memory scoring (keeps /leaderboard working for now)
+        // in-memory scoring (keeps /leaderboard working)
         addPointsToScores(allTimeScores, uid, name, 10);
         addPointsToScores(monthlyScores, uid, name, 10);
 
         // all-time row
         await updateLeaderboardRow({
-          chatId: wager.chatId,
+          chatId,
           userId: uid,
           name,
           scope: 'all',
@@ -1023,7 +1105,7 @@ async function resolveDueWagers() {
 
         // monthly row
         await updateLeaderboardRow({
-          chatId: wager.chatId,
+          chatId,
           userId: uid,
           name,
           scope: 'month',
@@ -1035,7 +1117,7 @@ async function resolveDueWagers() {
 
       // Losers: +0 in-memory, +1 loss in DB
       for (const uid of losersSet) {
-        const name = wager.participantNames.get(uid) || `User ${uid}`;
+        const name = participantNames.get(uid) || `User ${uid}`;
 
         // still keep them in the in-memory table
         addPointsToScores(allTimeScores, uid, name, 0);
@@ -1043,7 +1125,7 @@ async function resolveDueWagers() {
 
         // all-time row
         await updateLeaderboardRow({
-          chatId: wager.chatId,
+          chatId,
           userId: uid,
           name,
           scope: 'all',
@@ -1054,7 +1136,7 @@ async function resolveDueWagers() {
 
         // monthly row
         await updateLeaderboardRow({
-          chatId: wager.chatId,
+          chatId,
           userId: uid,
           name,
           scope: 'month',
@@ -1066,12 +1148,12 @@ async function resolveDueWagers() {
       // ---- end scoring ----
 
       const resultText = buildResolvedText(wager);
-      scheduleSave(); // persist resolved wager + leaderboard updates
+      scheduleSave(); // keep JSON backup for now (leaderboards + any in-memory wagers)
 
       // ---- Persist resolution to Postgres (best-effort) ----
       try {
         await prisma.wager.update({
-          where: { id },
+          where: { id: dbW.id },
           data: {
             resolved: true,
             finalPrice: price,
@@ -1079,59 +1161,67 @@ async function resolveDueWagers() {
           },
         });
       } catch (err) {
-        console.error('Failed to persist wager resolution to Postgres:', err.message || err);
-      }
-
-
-
-      // First try to edit the original wager message
-      let edited = false;
-      try {
-        console.log(
-          'Editing original message',
-          'chatId:',
-          wager.chatId,
-          'messageId:',
-          wager.messageId
-        );
-
-        await bot.telegram.editMessageText(
-          wager.chatId,
-          wager.messageId,
-          undefined,
-          resultText,
-          {
-            reply_markup: {
-              inline_keyboard: [], // remove YES/NO buttons
-            },
-          }
-        );
-
-        edited = true;
-        console.log('Successfully edited original message for wager', id);
-      } catch (editErr) {
         console.error(
-          'Failed to edit original message for wager',
-          id,
-          editErr.description || editErr.message
+          'Failed to persist wager resolution to Postgres:',
+          err.message || err
         );
       }
 
-      // Fallback: if edit failed for any reason, send a new resolution message
+      // First try to edit the original wager message (if we know messageId)
+      let edited = false;
+      if (dbW.messageId != null) {
+        try {
+          console.log(
+            'Editing original message',
+            'chatId:',
+            chatId,
+            'messageId:',
+            dbW.messageId
+          );
+
+          await bot.telegram.editMessageText(
+            chatId,
+            dbW.messageId,
+            undefined,
+            resultText,
+            {
+              reply_markup: {
+                inline_keyboard: [], // remove YES/NO buttons
+              },
+            }
+          );
+
+          edited = true;
+          console.log('Successfully edited original message for wager', dbW.id);
+        } catch (editErr) {
+          console.error(
+            'Failed to edit original message for wager',
+            dbW.id,
+            editErr.description || editErr.message
+          );
+        }
+      }
+
+      // Fallback: if edit failed or we had no messageId, send a new resolution message
       if (!edited) {
         await bot.telegram.sendMessage(
-          wager.chatId,
-          `Wager #${wager.id} resolved.\n\n` + resultText
+          chatId,
+          `Wager #${dbW.id} resolved.\n\n` + resultText
         );
-        console.log('Sent separate resolution message for wager', id);
+        console.log('Sent separate resolution message for wager', dbW.id);
       }
 
-      console.log('Resolved wager', id, 'YES wins?', yesWins);
+      console.log('Resolved wager', dbW.id, 'YES wins?', yesWins);
     } catch (err) {
-      console.error('Failed to resolve wager', id, err.message || err);
+      console.error(
+        'Failed to resolve wager',
+        dbW.id,
+        err.message || err
+      );
     }
   }
 }
+
 
 /* ----------------- Launch bot ----------------- */
 
