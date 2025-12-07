@@ -878,6 +878,64 @@ async function rebuildActiveWagersFromDb({ graceHours = 24 } = {}) {
   console.log(`Rebuilt ${wagers.size} active wagers from DB.`);
 }
 
+async function rebuildLeaderboardsFromDb() {
+  console.log('Rebuilding leaderboards from DB...');
+
+  // Clear in-memory leaderboards
+  allTimeScoresByChat.clear();
+  monthlyScoresByChat.clear();
+
+  let rows;
+  try {
+    rows = await prisma.leaderboardScore.findMany();
+  } catch (err) {
+    console.error(
+      'Failed to load leaderboard scores from Postgres:',
+      err.message || err
+    );
+    return;
+  }
+
+  if (!rows.length) {
+    console.log('No leaderboard rows found in DB.');
+    return;
+  }
+
+  for (const row of rows) {
+    const chatKey = Number(row.chatId) || row.chatId;
+    const userKey = Number(row.userId) || row.userId;
+    const points = (row.wins || 0) * 10; // matches +10 per win in memory
+
+    if (row.scope === 'all') {
+      if (!allTimeScoresByChat.has(chatKey)) {
+        allTimeScoresByChat.set(chatKey, new Map());
+      }
+      const chatMap = allTimeScoresByChat.get(chatKey);
+      const existing = chatMap.get(userKey) || { name: row.name, points: 0 };
+
+      // If multiple rows exist for same user (shouldn't, but just in case), sum points
+      const newPoints = (existing.points || 0) + points;
+      chatMap.set(userKey, { name: row.name, points: newPoints });
+    } else if (row.scope === 'month') {
+      const monthKey = row.monthKey;
+      if (!monthlyScoresByChat.has(chatKey)) {
+        monthlyScoresByChat.set(chatKey, new Map());
+      }
+      const monthsMap = monthlyScoresByChat.get(chatKey);
+      if (!monthsMap.has(monthKey)) {
+        monthsMap.set(monthKey, new Map());
+      }
+      const scoresMap = monthsMap.get(monthKey);
+      const existing = scoresMap.get(userKey) || { name: row.name, points: 0 };
+      const newPoints = (existing.points || 0) + points;
+      scoresMap.set(userKey, { name: row.name, points: newPoints });
+    }
+  }
+
+  console.log(
+    `Rebuilt leaderboards for ${allTimeScoresByChat.size} chat(s) from DB.`
+  );
+}
 
 // Handle button clicks
 bot.on('callback_query', async (ctx) => {
@@ -1228,6 +1286,9 @@ async function resolveDueWagers() {
 // Rebuild in-memory active wagers from Postgres (last 24h unresolved)
 await rebuildActiveWagersFromDb({ graceHours: 24 });
 
+// Rebuild leaderboards from Postgres
+await rebuildLeaderboardsFromDb();
+
 // Startup Banner
 console.log('Bot starting. PID:', process.pid, 'at', new Date().toISOString());
 
@@ -1239,6 +1300,7 @@ await resolveDueWagers();
 
 // Run resolver every 60 seconds
 setInterval(resolveDueWagers, 60 * 1000);
+
 
 
 process.once('SIGINT', async () => {
