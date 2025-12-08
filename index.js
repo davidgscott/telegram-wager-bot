@@ -2,7 +2,6 @@
 
 import { Telegraf, Markup } from 'telegraf';
 import 'dotenv/config';
-import fs from 'fs/promises';
 import fsSync from 'fs';
 import { PrismaClient } from '@prisma/client';
 
@@ -47,114 +46,6 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 const wagers = new Map();
 const allTimeScoresByChat = new Map();
 const monthlyScoresByChat = new Map();
-
-// ---- Persistent Storage Setup ----
-const DATA_FILE = './data.json';
-const STATE_VERSION = 1;
-
-// Debounced save (prevents I/O spam)
-let saveTimer = null;
-function scheduleSave() {
-  if (saveTimer) return;
-  saveTimer = setTimeout(async () => {
-    saveTimer = null;
-    try {
-      await saveState();
-    } catch (e) {
-      console.error('saveState failed:', e.message || e);
-    }
-  }, 1500); // 1.5s debounce window
-}
-
-function migrateState(state) {
-  if (!state || typeof state !== 'object') {
-    return { version: STATE_VERSION, wagers: [], allTime: [], monthly: [] };
-  }
-
-  const v = state.version || 0;
-
-  // v0 -> v1 (today: just normalize shape, future: real migrations here)
-  if (v < 1) {
-    state.wagers = state.wagers || [];
-    state.allTime = state.allTime || [];
-    state.monthly = state.monthly || [];
-  }
-
-  state.version = STATE_VERSION;
-  return state;
-}
-
-async function saveState() {
-  const state = {
-    version: STATE_VERSION,
-    wagers: [...wagers.entries()].map(([id, w]) => ({
-      id,
-      data: {
-        ...w,
-        yes: [...w.yes],
-        no: [...w.no],
-        participantNames: [...w.participantNames.entries()],
-        countdownIntervalId: null, // never persist timer handles
-      },
-    })),
-    allTime: [...allTimeScoresByChat.entries()].map(([chatId, map]) => ({
-      chatId,
-      scores: [...map.entries()],
-    })),
-    monthly: [...monthlyScoresByChat.entries()].map(([chatId, months]) => ({
-      chatId,
-      months: [...months.entries()].map(([monthKey, map]) => ({
-        monthKey,
-        scores: [...map.entries()],
-      })),
-    })),
-  };
-
-  // Atomic write to avoid corruption on crash
-  const tmp = `${DATA_FILE}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(state, null, 2));
-  await fs.rename(tmp, DATA_FILE);
-}
-
-async function loadState() {
-  try {
-    const raw = await fs.readFile(DATA_FILE, 'utf8');
-    let state = JSON.parse(raw);
-    state = migrateState(state);
-
-    // Restore wagers
-    for (const w of state.wagers || []) {
-      const d = w.data;
-      wagers.set(w.id, {
-        ...d,
-        yes: new Set(d.yes),
-        no: new Set(d.no),
-        participantNames: new Map(d.participantNames),
-        countdownIntervalId: null,
-        resolutionTime: new Date(d.resolutionTime),
-        voteDeadline: new Date(d.voteDeadline),
-        createdAt: new Date(d.createdAt),
-      });
-    }
-
-    // Restore leaderboards
-    for (const a of state.allTime || []) {
-      allTimeScoresByChat.set(a.chatId, new Map(a.scores));
-    }
-
-    for (const m of state.monthly || []) {
-      const monthsMap = new Map();
-      for (const month of m.months || []) {
-        monthsMap.set(month.monthKey, new Map(month.scores));
-      }
-      monthlyScoresByChat.set(m.chatId, monthsMap);
-    }
-
-    console.log('State loaded.');
-  } catch {
-    console.log('No previous state found. Starting fresh.');
-  }
-}
 
 /* ----------------- Helpers ----------------- */
 
@@ -751,7 +642,7 @@ bot.command('wager', async (ctx) => {
   };
 
   wagers.set(id, wager);
-  // scheduleSave(); // JSON backup (for now)
+
 
   // ---- Persist wager to Postgres (best-effort) ----
   try {
@@ -793,7 +684,6 @@ bot.command('wager', async (ctx) => {
 
   // Store messageId in memory + JSON + DB
   wager.messageId = message.message_id;
-  // scheduleSave(); // messageID matters after restart
 
   // ---- Update messageId in DB once we know it ----
   try {
@@ -804,7 +694,6 @@ bot.command('wager', async (ctx) => {
   } catch (err) {
     console.error('Failed to update wager.messageId in Postgres:', err.message || err);
   }
-
 
   // Start the countdown updater for this wager
   startCountdown(wager);
@@ -1025,8 +914,6 @@ bot.on('callback_query', async (ctx) => {
   } else {
     return ctx.answerCbQuery('Unknown option.', { show_alert: true });
   }
-
-  // scheduleSave(); // persist vote + participant name
 
   // ---- Persist vote to Postgres (one row per user per wager) ----
   try {
@@ -1254,7 +1141,6 @@ async function resolveDueWagers() {
       // ---- end scoring ----
 
       const resultText = buildResolvedText(wager);
-      // scheduleSave(); // keep JSON backup for now (leaderboards + any in-memory wagers)
 
       // ---- Persist resolution to Postgres (best-effort) ----
       try {
