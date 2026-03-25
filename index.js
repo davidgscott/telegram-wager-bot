@@ -462,10 +462,23 @@ bot.start((ctx) => {
   );
 });
 
+const leaderboardCooldowns = new Map(); // chatId -> last used timestamp
+
 bot.command('leaderboard', async (ctx) => {
   if (ctx.chat.type === 'private') {
     return ctx.reply('Leaderboards are group-specific. Use /leaderboard in a group chat to see scores.');
   }
+
+  const chatId = ctx.chat.id;
+  const now = Date.now();
+  const lastUsed = leaderboardCooldowns.get(chatId) || 0;
+  const cooldownMs = 30 * 60 * 1000; // 30 minutes
+  if (now - lastUsed < cooldownMs) {
+    const minsLeft = Math.ceil((cooldownMs - (now - lastUsed)) / 60000);
+    return ctx.reply(`/leaderboard can only be used once every 30 minutes. Try again in ${minsLeft} minute(s).`);
+  }
+  leaderboardCooldowns.set(chatId, now);
+
   const chatIdStr = String(ctx.chat.id);
   const text = ctx.message.text || '';
   const arg = text.replace(/^\/leaderboard(@\w+)?\s*/, '').trim().toLowerCase();
