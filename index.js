@@ -34,7 +34,10 @@ if (!IS_CLOUD) {
 }
 
 const prisma = new PrismaClient();
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = process.env.OPENAI_API_KEY
+  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+  : null;
+if (!openai) console.warn('WARNING: OPENAI_API_KEY not set — natural language wager parsing disabled.');
 
 // ---- Telegraf Bot Instance ----
 const bot = new Telegraf(process.env.BOT_TOKEN);
@@ -758,6 +761,7 @@ Your job:
 Always call the extract_wager function with your best extraction.`;
 
 async function parseWagerWithLLM(messages) {
+  if (!openai) throw new Error('Natural language parsing unavailable (no API key).');
   const response = await openai.chat.completions.create({
     model: 'gpt-4o-mini',
     messages: [
