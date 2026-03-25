@@ -532,15 +532,8 @@ bot.command('leaderboard', async (ctx) => {
 
 // WagerHelp Instructions
 bot.command('wagerhelp', async (ctx) => {
-  // In group chats, redirect to DM and auto-delete the prompt
   if (ctx.chat.type !== 'private') {
-    const msg = await ctx.reply('/wagerhelp is only available via DM with the bot. This message will self-destruct in 30 seconds.');
-    // Also try to delete the user's /wagerhelp command message
-    try { await ctx.deleteMessage(ctx.message.message_id); } catch {}
-    setTimeout(async () => {
-      try { await ctx.deleteMessage(msg.message_id); } catch {}
-    }, 30_000);
-    return;
+    return ctx.reply('/wagerhelp is only available via DM.');
   }
 
   ctx.reply(
