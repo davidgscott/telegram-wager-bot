@@ -463,6 +463,9 @@ bot.start((ctx) => {
 });
 
 bot.command('leaderboard', async (ctx) => {
+  if (ctx.chat.type === 'private') {
+    return ctx.reply('Leaderboards are group-specific. Use /leaderboard in a group chat to see scores.');
+  }
   const chatIdStr = String(ctx.chat.id);
   const text = ctx.message.text || '';
   const arg = text.replace(/^\/leaderboard(@\w+)?\s*/, '').trim().toLowerCase();
