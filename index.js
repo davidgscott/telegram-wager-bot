@@ -694,16 +694,7 @@ bot.command('wager', async (ctx) => {
   const cleanedInput = withoutCommand.replace('--debug', '').trim();
 
   if (!cleanedInput) {
-    return ctx.reply(
-      'Create a wager using natural language or the strict format:\n\n' +
-        'Natural language:\n' +
-        '/wager BTC above 70000 by tomorrow\n' +
-        '/wager I think ETH will be under 3000 in 2 hours\n\n' +
-        'Strict format:\n' +
-        '/wager BTC > 70000 | in 2 hours\n\n' +
-        'Supports any coin on CoinGecko (BTC, ETH, SOL, DOGE, etc)\n' +
-        'Resolution must be at least 5 minutes from now.'
-    );
+    return ctx.reply('TICKER above or below PRICE by WHEN?\n\nExample: /wager BTC above 70000 in 2 hours');
   }
 
   const now = new Date();
