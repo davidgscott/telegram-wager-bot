@@ -592,17 +592,17 @@ bot.command('powerscore', (ctx) => {
 
 // Personal stats (DM only)
 bot.command('mystats', async (ctx) => {
-  if (ctx.chat.type !== 'private') {
-    return ctx.reply('/mystats is only available via DM.');
-  }
-
   const userId = String(ctx.from.id);
+  const isGroup = ctx.chat.type !== 'private';
+  // In groups, scope stats to this chat; in DMs, show across all chats
+  const chatFilter = isGroup ? { chatId: String(ctx.chat.id) } : {};
+  const wagerChatFilter = isGroup ? { chatId: String(ctx.chat.id) } : {};
   const now = new Date();
 
   try {
-    // 1. Leaderboard rankings across all chats
+    // 1. Leaderboard rankings
     const scores = await prisma.leaderboardScore.findMany({
-      where: { userId, scope: 'all' },
+      where: { userId, scope: 'all', ...chatFilter },
       orderBy: { powerScore: 'desc' },
     });
 
@@ -612,7 +612,6 @@ bot.command('mystats', async (ctx) => {
     } else {
       const lines = [];
       for (const s of scores) {
-        // Find user's rank in that chat
         const higher = await prisma.leaderboardScore.count({
           where: { chatId: s.chatId, scope: 'all', monthKey: 'ALL', powerScore: { gt: s.powerScore } },
         });
@@ -625,10 +624,8 @@ bot.command('mystats', async (ctx) => {
 
     // 2. Pending/unresolved wagers the user has voted on
     const pendingVotes = await prisma.wagerVote.findMany({
-      where: { userId },
-      include: {
-        wager: { where: { resolved: false } },
-      },
+      where: { userId, wager: { resolved: false, ...wagerChatFilter } },
+      include: { wager: true },
     });
     const pendingWagersList = pendingVotes
       .filter(v => v.wager && !v.wager.resolved)
@@ -638,25 +635,19 @@ bot.command('mystats', async (ctx) => {
         return `${w.assetSymbol} ${w.operator} ${w.threshold} — you voted ${v.side.toUpperCase()} — resolves in ${timeLeft}`;
       });
 
-    let pendingText;
-    if (!pendingWagersList.length) {
-      pendingText = 'No pending wagers.';
-    } else {
-      pendingText = pendingWagersList.join('\n');
-    }
+    const pendingText = pendingWagersList.length
+      ? pendingWagersList.join('\n')
+      : 'No pending wagers.';
 
     // 3. Recent resolved wagers (last 25)
     const recentVotes = await prisma.wagerVote.findMany({
-      where: { userId },
-      include: {
-        wager: { where: { resolved: true } },
-      },
+      where: { userId, wager: { resolved: true, ...wagerChatFilter } },
+      include: { wager: true },
       orderBy: { createdAt: 'desc' },
-      take: 50, // fetch extra since some may be unresolved
+      take: 25,
     });
     const resolvedHistory = recentVotes
       .filter(v => v.wager && v.wager.resolved)
-      .slice(0, 25)
       .map(v => {
         const w = v.wager;
         const won = (w.outcomeYes && v.side === 'yes') || (!w.outcomeYes && v.side === 'no');
@@ -664,18 +655,25 @@ bot.command('mystats', async (ctx) => {
         return `${icon} ${w.assetSymbol} ${w.operator} ${w.threshold} — voted ${v.side.toUpperCase()} — price: $${w.finalPrice}`;
       });
 
-    let historyText;
-    if (!resolvedHistory.length) {
-      historyText = 'No resolved wagers yet.';
-    } else {
-      historyText = resolvedHistory.join('\n');
-    }
+    const historyText = resolvedHistory.length
+      ? resolvedHistory.join('\n')
+      : 'No resolved wagers yet.';
 
     const reply =
       `📊 Your Stats\n\n` +
       `🏆 Rankings (all-time):\n${rankingText}\n\n` +
       `⏳ Pending Wagers:\n${pendingText}\n\n` +
       `📜 Recent History (last ${resolvedHistory.length || 0}):\n${historyText}`;
+
+    // In group chats, send via DM and confirm in the group
+    if (isGroup) {
+      try {
+        await bot.telegram.sendMessage(ctx.from.id, reply);
+        return ctx.reply('Stats sent to your DM!');
+      } catch {
+        return ctx.reply('I couldn\'t DM you. Please start a chat with me first, then try again.');
+      }
+    }
 
     return ctx.reply(reply);
   } catch (err) {
