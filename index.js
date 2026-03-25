@@ -342,12 +342,15 @@ function buildWagerText(wager, now = new Date()) {
   }
 
   const conditionLine = `Condition: ${wager.assetSymbol} ${operatorLabel(wager.operator)} $${wager.threshold}`;
-  const deadlineLabel = isBeforeDeadlineOp(wager.operator) ? 'Deadline' : 'Resolves';
+  const isBefore = isBeforeDeadlineOp(wager.operator);
+  const resolveLine = isBefore
+    ? `On or before: ${formatUtc(wager.resolutionTime)} (${formatRelative(wager.resolutionTime, now)})`
+    : `By: ${formatUtc(wager.resolutionTime)} (${formatRelative(wager.resolutionTime, now)})`;
 
   return (
     `Wager #${wager.id}\n` +
     `${conditionLine}\n\n` +
-    `${deadlineLabel}: ${formatUtc(wager.resolutionTime)} (${formatRelative(wager.resolutionTime, now)})\n` +
+    `${resolveLine}\n` +
     `Voting closes at: ${formatUtc(wager.voteDeadline)}\n\n` +
     `YES: ${wager.yes.size} user(s)\n` +
     `NO: ${wager.no.size} user(s)\n\n` +
@@ -358,7 +361,9 @@ function buildWagerText(wager, now = new Date()) {
 // Build text for a resolved wager
 function buildResolvedText(wager) {
   const conditionLine = `Condition: ${wager.assetSymbol} ${operatorLabel(wager.operator)} $${wager.threshold}`;
+  const isBefore = isBeforeDeadlineOp(wager.operator);
   const winnerSide = wager.outcomeYes ? 'YES' : 'NO';
+  const deadlineLabel = isBefore ? 'Deadline was' : 'Resolved at';
 
   const winnersText =
     wager.winners && wager.winners.length
@@ -373,8 +378,8 @@ function buildResolvedText(wager) {
   return (
     `Wager #${wager.id} (RESOLVED)\n` +
     `${conditionLine}\n\n` +
-    `Resolved at: ${formatUtc(wager.resolutionTime)}\n` +
-    `Final price: ${wager.finalPrice} USD\n` +
+    `${deadlineLabel}: ${formatUtc(wager.resolutionTime)}\n` +
+    `Final price: $${wager.finalPrice}\n` +
     `Winning side: ${winnerSide}\n\n` +
     `YES: ${wager.yes.size} user(s)\n` +
     `NO: ${wager.no.size} user(s)\n\n` +
