@@ -51,11 +51,50 @@ const monthlyScoresByChat = new Map();
 const pendingWagers = new Map();
 
 // Mapping of supported ticker symbols to CoinGecko IDs
+// Common symbols we know without a network call
 const SYMBOL_TO_ID = {
   BTC: 'bitcoin',
   ETH: 'ethereum',
   DIVI: 'divi',
+  SOL: 'solana',
+  ADA: 'cardano',
+  XRP: 'ripple',
+  DOGE: 'dogecoin',
+  DOT: 'polkadot',
+  AVAX: 'avalanche-2',
+  MATIC: 'matic-network',
+  LINK: 'chainlink',
+  LTC: 'litecoin',
+  SHIB: 'shiba-inu',
+  UNI: 'uniswap',
+  ATOM: 'cosmos',
 };
+
+// Cache for dynamically resolved symbols (avoids repeated API calls)
+const symbolCache = new Map(Object.entries(SYMBOL_TO_ID));
+
+// Resolve a ticker symbol to a CoinGecko ID.
+// Checks static map + cache first, then searches CoinGecko API.
+async function resolveAssetId(symbol) {
+  const upper = symbol.toUpperCase();
+  if (symbolCache.has(upper)) return { assetSymbol: upper, assetId: symbolCache.get(upper) };
+
+  try {
+    const url = `https://api.coingecko.com/api/v3/search?query=${encodeURIComponent(upper)}`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const data = await res.json();
+    // Find the coin whose symbol matches exactly (case-insensitive)
+    const match = (data.coins || []).find(c => c.symbol.toUpperCase() === upper);
+    if (match) {
+      symbolCache.set(upper, match.id);
+      return { assetSymbol: upper, assetId: match.id };
+    }
+  } catch (err) {
+    console.error('CoinGecko search failed:', err.message || err);
+  }
+  return null;
+}
 
 /* ----------------- Helpers ----------------- */
 
@@ -239,7 +278,7 @@ function parseResolution(raw, now = new Date()) {
 
 
 // Parse "SYMBOL OPERATOR VALUE" into structured condition
-function parseCondition(raw) {
+async function parseCondition(raw) {
   const trimmed = raw.trim();
   // e.g. "BTC > 100000" or "DIVI <= 0.01"
   const match = trimmed.match(/^([A-Za-z0-9]+)\s*(>=|<=|>|<)\s*([0-9]+(?:\.[0-9]+)?)$/);
@@ -249,10 +288,10 @@ function parseCondition(raw) {
   const threshold = Number(thresholdStr);
   if (!Number.isFinite(threshold)) return null;
 
-  const assetSymbol = symbolRaw.toUpperCase();
-  const assetId = SYMBOL_TO_ID[assetSymbol] || null;
+  const resolved = await resolveAssetId(symbolRaw);
+  if (!resolved) return null;
 
-  return { assetSymbol, assetId, operator, threshold };
+  return { assetSymbol: resolved.assetSymbol, assetId: resolved.assetId, operator, threshold };
 }
 
 // Evaluate price against the condition, return true if YES should win
@@ -417,7 +456,7 @@ bot.start((ctx) => {
       '/wager I think ETH will be under 3000 by tomorrow\n\n' +
       'Or use the strict format:\n' +
       '/wager BTC > 70000 | in 2 hours\n\n' +
-      'Supported coins: BTC, ETH, DIVI\n' +
+      'Supports any coin on CoinGecko (BTC, ETH, SOL, DOGE, etc)\n' +
       'Resolution must be at least 5 minutes from now.\n' +
       'Voting window is 60 seconds after creation.'
   );
@@ -503,7 +542,7 @@ bot.command('wagerhelp', (ctx) => {
       'You can also use the strict format:\n' +
       '/wager BTC > 70000 | in 2 hours\n' +
       '/wager ETH < 3000 | 2026-12-31 00:00\n\n' +
-      'Supported coins: BTC, ETH, DIVI\n\n' +
+      'Supports any coin on CoinGecko (BTC, ETH, SOL, DOGE, etc)\n\n' +
       'Rules:\n' +
       '• Resolution must be at least 5 minutes from now\n' +
       '• Prices come from CoinGecko\n' +
@@ -561,7 +600,7 @@ bot.command('wager', async (ctx) => {
         '/wager I think ETH will be under 3000 in 2 hours\n\n' +
         'Strict format:\n' +
         '/wager BTC > 70000 | in 2 hours\n\n' +
-        'Supported coins: BTC, ETH, DIVI\n' +
+        'Supports any coin on CoinGecko (BTC, ETH, SOL, DOGE, etc)\n' +
         'Resolution must be at least 5 minutes from now.'
     );
   }
@@ -569,7 +608,7 @@ bot.command('wager', async (ctx) => {
   const now = new Date();
 
   // ---- Step 1: Try strict parsing first (free, instant) ----
-  const strictResult = tryStrictParse(cleanedInput, now, isDebug);
+  const strictResult = await tryStrictParse(cleanedInput, now, isDebug);
   if (strictResult.success) {
     return await createWager(ctx, strictResult.condition, strictResult.resolutionTime, now);
   }
@@ -593,7 +632,7 @@ bot.command('wager', async (ctx) => {
 
     if (result.confidence === 'complete') {
       // Validate the extracted fields
-      const validation = validateLLMResult(result, now, isDebug);
+      const validation = await validateLLMResult(result, now, isDebug);
       if (validation.error) {
         return ctx.reply(validation.error);
       }
@@ -625,13 +664,13 @@ bot.command('wager', async (ctx) => {
 });
 
 // Try the original strict "CONDITION | TIME" format — returns {success, condition, resolutionTime} or {error}
-function tryStrictParse(input, now, isDebug) {
+async function tryStrictParse(input, now, isDebug) {
   const parts = input.split('|').map((s) => s.trim());
   if (parts.length !== 2 || !parts[0] || !parts[1]) {
     return { success: false };
   }
 
-  const condition = parseCondition(parts[0]);
+  const condition = await parseCondition(parts[0]);
   if (!condition) return { success: false };
 
   const resolutionTime = parseResolution(parts[1], now);
@@ -647,17 +686,18 @@ function tryStrictParse(input, now, isDebug) {
 }
 
 // Validate and convert LLM extraction result into condition + resolutionTime
-function validateLLMResult(result, now, isDebug) {
+async function validateLLMResult(result, now, isDebug) {
   const { symbol, operator, threshold, resolution_time } = result;
 
   if (!symbol || !operator || threshold == null || !resolution_time) {
     return { error: 'Missing required wager fields. Please try again.' };
   }
 
-  const assetId = SYMBOL_TO_ID[symbol];
-  if (!assetId) {
-    return { error: `Unsupported symbol: ${symbol}. Supported: ${Object.keys(SYMBOL_TO_ID).join(', ')}` };
+  const resolved = await resolveAssetId(symbol);
+  if (!resolved) {
+    return { error: `Could not find "${symbol}" on CoinGecko. Check the ticker symbol and try again.` };
   }
+  const assetId = resolved.assetId;
 
   // Parse resolution time — try relative ("2 hours"), then our strict format, then ISO timestamp
   let resolutionTime = parseResolution(`in ${resolution_time}`, now);
@@ -682,7 +722,7 @@ function validateLLMResult(result, now, isDebug) {
   }
 
   return {
-    condition: { assetSymbol: symbol, assetId, operator, threshold },
+    condition: { assetSymbol: resolved.assetSymbol, assetId, operator, threshold },
     resolutionTime,
   };
 }
@@ -699,8 +739,7 @@ const WAGER_EXTRACT_TOOL = {
       properties: {
         symbol: {
           type: 'string',
-          enum: Object.keys(SYMBOL_TO_ID),
-          description: 'The cryptocurrency ticker symbol.',
+          description: 'The cryptocurrency ticker symbol (e.g. BTC, ETH, SOL, DOGE, ADA, etc). Use the standard ticker, uppercased.',
         },
         operator: {
           type: 'string',
@@ -737,8 +776,8 @@ const WAGER_EXTRACT_TOOL = {
 
 const WAGER_SYSTEM_PROMPT = `You are a helper for a Telegram crypto wager bot. Users want to create price prediction wagers.
 
-Supported cryptocurrencies: BTC (Bitcoin), ETH (Ethereum), DIVI (Divi).
-Common aliases: "bitcoin" = BTC, "eth"/"ether"/"ethereum" = ETH, "divi" = DIVI.
+Any cryptocurrency available on CoinGecko is supported. Use standard ticker symbols (e.g. BTC, ETH, SOL, DOGE, ADA, XRP, AVAX, LINK, DIVI, etc).
+Common aliases: "bitcoin" = BTC, "ethereum"/"ether" = ETH, "solana" = SOL, "dogecoin" = DOGE, etc.
 
 Operator mapping:
 - "above", "over", "more than", "higher than", "greater than" → ">"
@@ -1149,7 +1188,7 @@ bot.on('text', async (ctx) => {
 
     if (result.confidence === 'complete') {
       pendingWagers.delete(pendingKey);
-      const validation = validateLLMResult(result, now, false);
+      const validation = await validateLLMResult(result, now, false);
       if (validation.error) {
         return ctx.reply(validation.error);
       }
