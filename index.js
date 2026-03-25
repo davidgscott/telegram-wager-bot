@@ -418,7 +418,7 @@ bot.start((ctx) => {
       'Or use the strict format:\n' +
       '/wager BTC > 70000 | in 2 hours\n\n' +
       'Supported coins: BTC, ETH, DIVI\n' +
-      'Resolution must be at least 10 minutes from now.\n' +
+      'Resolution must be at least 5 minutes from now.\n' +
       'Voting window is 60 seconds after creation.'
   );
 });
@@ -505,7 +505,7 @@ bot.command('wagerhelp', (ctx) => {
       '/wager ETH < 3000 | 2026-12-31 00:00\n\n' +
       'Supported coins: BTC, ETH, DIVI\n\n' +
       'Rules:\n' +
-      '• Resolution must be at least 10 minutes from now\n' +
+      '• Resolution must be at least 5 minutes from now\n' +
       '• Prices come from CoinGecko\n' +
       '• Voting stays open for 60 seconds after creation\n' +
       '• Winners and losers are displayed automatically at resolution\n\n' +
@@ -562,7 +562,7 @@ bot.command('wager', async (ctx) => {
         'Strict format:\n' +
         '/wager BTC > 70000 | in 2 hours\n\n' +
         'Supported coins: BTC, ETH, DIVI\n' +
-        'Resolution must be at least 10 minutes from now.'
+        'Resolution must be at least 5 minutes from now.'
     );
   }
 
@@ -638,9 +638,9 @@ function tryStrictParse(input, now, isDebug) {
   if (!resolutionTime || isNaN(resolutionTime.getTime())) return { success: false };
 
   const diffMs = resolutionTime.getTime() - now.getTime();
-  const minResolutionMs = 10 * 60 * 1000;
+  const minResolutionMs = 5 * 60 * 1000;
   if (!isDebug && diffMs < minResolutionMs) {
-    return { success: false, error: `Resolution time must be at least 10 minutes from now.` };
+    return { success: false, error: `Resolution time must be at least 5 minutes from now.` };
   }
 
   return { success: true, condition, resolutionTime };
@@ -676,9 +676,9 @@ function validateLLMResult(result, now, isDebug) {
   }
 
   const diffMs = resolutionTime.getTime() - now.getTime();
-  const minResolutionMs = 10 * 60 * 1000;
+  const minResolutionMs = 5 * 60 * 1000;
   if (!isDebug && diffMs < minResolutionMs) {
-    return { error: 'Resolution time must be at least 10 minutes from now.' };
+    return { error: 'Resolution time must be at least 5 minutes from now.' };
   }
 
   return {
@@ -1175,7 +1175,7 @@ bot.on('text', async (ctx) => {
 setInterval(() => {
   const now = Date.now();
   for (const [key, pending] of pendingWagers.entries()) {
-    if (now - pending.createdAt.getTime() > 10 * 60 * 1000) {
+    if (now - pending.createdAt.getTime() > 5 * 60 * 1000) {
       pendingWagers.delete(key);
     }
   }
