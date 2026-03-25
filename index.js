@@ -4,6 +4,7 @@ import { Telegraf, Markup } from 'telegraf';
 import 'dotenv/config';
 import fsSync from 'fs';
 import { PrismaClient } from '@prisma/client';
+import OpenAI from 'openai';
 
 // ---- Prevent accidental double-run ----
 
@@ -38,6 +39,7 @@ function acquireLock() {
 acquireLock();
 
 const prisma = new PrismaClient();
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // ---- Telegraf Bot Instance ----
 const bot = new Telegraf(process.env.BOT_TOKEN);
@@ -46,6 +48,16 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 const wagers = new Map();
 const allTimeScoresByChat = new Map();
 const monthlyScoresByChat = new Map();
+
+// Pending natural-language wager conversations (keyed by "chatId:userId")
+const pendingWagers = new Map();
+
+// Mapping of supported ticker symbols to CoinGecko IDs
+const SYMBOL_TO_ID = {
+  BTC: 'bitcoin',
+  ETH: 'ethereum',
+  DIVI: 'divi',
+};
 
 /* ----------------- Helpers ----------------- */
 
@@ -164,6 +176,29 @@ function formatUtc(date) {
   return `${ymd} ${hh}:${mm} UTC`;
 }
 
+// Format a future date as a human-readable relative string like "in about 2 hours"
+function formatRelative(date, now = new Date()) {
+  const diffMs = date.getTime() - now.getTime();
+  if (diffMs <= 0) return 'now';
+
+  const minutes = Math.round(diffMs / 60000);
+  if (minutes < 1) return 'less than a minute';
+  if (minutes === 1) return 'about 1 minute';
+  if (minutes < 60) return `about ${minutes} minutes`;
+
+  const hours = Math.floor(minutes / 60);
+  const remainMins = minutes % 60;
+  if (hours < 24) {
+    if (remainMins === 0) return `about ${hours} hour${hours > 1 ? 's' : ''}`;
+    return `about ${hours}h ${remainMins}m`;
+  }
+
+  const days = Math.floor(hours / 24);
+  const remainHours = hours % 24;
+  if (remainHours === 0) return `about ${days} day${days > 1 ? 's' : ''}`;
+  return `about ${days}d ${remainHours}h`;
+}
+
 // Parse absolute UTC OR relative ("in 2 hours", "in 30m", etc.)
 function parseResolution(raw, now = new Date()) {
   const trimmed = raw.trim();
@@ -217,15 +252,7 @@ function parseCondition(raw) {
   if (!Number.isFinite(threshold)) return null;
 
   const assetSymbol = symbolRaw.toUpperCase();
-
-  // Mapping for CoinGecko
-  const symbolToId = {
-    BTC: 'bitcoin',
-    ETH: 'ethereum',
-    DIVI: 'divi',
-  };
-
-  const assetId = symbolToId[assetSymbol] || null;
+  const assetId = SYMBOL_TO_ID[assetSymbol] || null;
 
   return { assetSymbol, assetId, operator, threshold };
 }
@@ -263,7 +290,7 @@ function buildWagerText(wager, now = new Date()) {
   return (
     `Wager #${wager.id}\n` +
     `${conditionLine}\n\n` +
-    `Resolves at: ${formatUtc(wager.resolutionTime)}\n` +
+    `Resolves: ${formatUtc(wager.resolutionTime)} (${formatRelative(wager.resolutionTime, now)})\n` +
     `Voting closes at: ${formatUtc(wager.voteDeadline)}\n\n` +
     `YES: ${wager.yes.size} user(s)\n` +
     `NO: ${wager.no.size} user(s)\n\n` +
@@ -289,7 +316,7 @@ function buildResolvedText(wager) {
   return (
     `Wager #${wager.id} (RESOLVED)\n` +
     `${conditionLine}\n\n` +
-    `Resolves at: ${formatUtc(wager.resolutionTime)}\n` +
+    `Resolved at: ${formatUtc(wager.resolutionTime)}\n` +
     `Final price: ${wager.finalPrice} USD\n` +
     `Winning side: ${winnerSide}\n\n` +
     `YES: ${wager.yes.size} user(s)\n` +
@@ -387,11 +414,14 @@ async function getCurrentPriceUsd(coinId) {
 bot.start((ctx) => {
   ctx.reply(
     'Hey! I help groups create friendly prediction wagers (no real money).\n\n' +
-      'Create a wager like:\n' +
-      '/wager BTC > 100000 | 2025-12-31 00:00\n' +
-      '- Times are in UTC\n' +
-      '- Resolution must be at least 10 minutes from now\n' +
-      '- Voting window is 60 seconds after creation'
+      'Create a wager using plain language:\n' +
+      '/wager BTC above 70000 in 2 hours\n' +
+      '/wager I think ETH will be under 3000 by tomorrow\n\n' +
+      'Or use the strict format:\n' +
+      '/wager BTC > 70000 | in 2 hours\n\n' +
+      'Supported coins: BTC, ETH, DIVI\n' +
+      'Resolution must be at least 10 minutes from now.\n' +
+      'Voting window is 60 seconds after creation.'
   );
 });
 
@@ -467,34 +497,21 @@ bot.command('leaderboard', async (ctx) => {
 bot.command('wagerhelp', (ctx) => {
   ctx.reply(
     'DIVI Wager Bot allows you to create friendly prediction wagers in Telegram groups.\n\n' +
-    'How to create a wager:\n\n' +
-      'Basic format:\n' +
-      '/wager SYMBOL OPERATOR VALUE | TIME\n\n' +
-      'Examples:\n' +
-      '/wager DIVI > 0.002 | 2025-12-31 00:00\n' +
-      '/wager BTC >= 90000 | in 2 hours\n' +
-      '/wager ETH < 3000 | in 90 minutes\n\n' +
-      'Operators allowed:\n' +
-      '>   <   >=   <=\n\n' +
-      'Time formats supported:\n' +
-      '• Absolute UTC:  YYYY-MM-DD HH:MM\n' +
-      '   Example:  2025-12-31 00:00\n' +
-      '• Relative:  in <number><unit>\n' +
-      '   Examples:\n' +
-      '   in 2 hours\n' +
-      '   in 45 minutes\n' +
-      '   in 90m\n' +
-      '   in 2 days\n\n' +
-      'Relative units supported:\n' +
-      '• minutes: m, min, mins, minute, minutes\n' +
-      '• hours: h, hr, hrs, hour, hours\n' +
-      '• days: d, day, days\n\n' +
+    'Just describe your wager in plain language:\n' +
+      '/wager BTC above 70000 in 2 hours\n' +
+      '/wager I think ETH will drop below 3000 by tomorrow\n' +
+      '/wager DIVI over 0.002 by end of the week\n\n' +
+      'The bot will figure out what you mean! If something is unclear, it will ask you.\n\n' +
+      'You can also use the strict format:\n' +
+      '/wager BTC > 70000 | in 2 hours\n' +
+      '/wager ETH < 3000 | 2026-12-31 00:00\n\n' +
+      'Supported coins: BTC, ETH, DIVI\n\n' +
       'Rules:\n' +
       '• Resolution must be at least 10 minutes from now\n' +
-      '• Prices for wager resolution come from CoinGecko\n' +
+      '• Prices come from CoinGecko\n' +
       '• Voting stays open for 60 seconds after creation\n' +
       '• Winners and losers are displayed automatically at resolution\n\n' +
-      'Tip: Type /Leaderboard to see the top winners 🐐.\n' +
+      'Tip: Type /leaderboard to see the top winners 🐐\n' +
       '🏆 Rankings are based on win rate and total wagers — consistency matters.'
   );
 });
@@ -538,98 +555,256 @@ bot.command('wager', async (ctx) => {
   // Remove --debug from the input so parsing stays clean
   const cleanedInput = withoutCommand.replace('--debug', '').trim();
 
-
   if (!cleanedInput) {
     return ctx.reply(
-      'How to create a wager:\n\n' +
-        'Basic format:\n' +
-        '/wager SYMBOL OPERATOR VALUE | TIME\n\n' +
-        'Examples:\n' +
-        '/wager DIVI > 0.002 | 2025-12-31 00:00\n' +
-        '/wager BTC >= 90000 | in 2 hours\n' +
-        '/wager ETH < 3000 | in 90 minutes\n\n' +
-        'Rules:\n' +
-        '• Resolution must be at least 10 minutes from now\n' +
-        '• Prices for wager resolution come from CoinGecko\n' +
-        '• Voting stays open for 60 seconds after creation\n\n' +
-        'Tip: You can also type /wagerhelp for the full instructions.'
+      'Create a wager using natural language or the strict format:\n\n' +
+        'Natural language:\n' +
+        '/wager BTC above 70000 by tomorrow\n' +
+        '/wager I think ETH will be under 3000 in 2 hours\n\n' +
+        'Strict format:\n' +
+        '/wager BTC > 70000 | in 2 hours\n\n' +
+        'Supported coins: BTC, ETH, DIVI\n' +
+        'Resolution must be at least 10 minutes from now.'
     );
   }
 
-  // Split into condition and resolution time
-  const [rawCondition, rawResolution] = cleanedInput.split('|').map((s) => s.trim());
+  const now = new Date();
 
-  if (!rawCondition || !rawResolution) {
+  // ---- Step 1: Try strict parsing first (free, instant) ----
+  const strictResult = tryStrictParse(cleanedInput, now, isDebug);
+  if (strictResult.success) {
+    return await createWager(ctx, strictResult.condition, strictResult.resolutionTime, now);
+  }
+  // If strict parsing returned an explicit user error (e.g. bad time), show it
+  if (strictResult.error) {
+    // Don't show strict-format errors — fall through to LLM instead
+  }
+
+  // ---- Step 2: Fall back to LLM natural language parsing ----
+  const pendingKey = `${ctx.chat.id}:${ctx.from.id}`;
+
+  try {
+    const llmMessages = [
+      { role: 'user', content: `Current UTC time: ${now.toISOString()}\n\nCreate a wager: ${cleanedInput}` },
+    ];
+
+    const result = await parseWagerWithLLM(llmMessages);
+    if (!result) {
+      return ctx.reply('Sorry, I couldn\'t understand that. Try: /wager BTC > 70000 | in 2 hours');
+    }
+
+    if (result.confidence === 'complete') {
+      // Validate the extracted fields
+      const validation = validateLLMResult(result, now, isDebug);
+      if (validation.error) {
+        return ctx.reply(validation.error);
+      }
+      return await createWager(ctx, validation.condition, validation.resolutionTime, now);
+    }
+
+    if (result.confidence === 'partial') {
+      // Store conversation for follow-up
+      pendingWagers.set(pendingKey, {
+        partialData: result,
+        conversationHistory: llmMessages,
+        createdAt: now,
+        attempts: 1,
+      });
+      return ctx.reply(result.clarification_message || 'I need a bit more info. What coin, price, and time did you have in mind?');
+    }
+
+    // confidence === 'unclear'
     return ctx.reply(
-      'Please use the format:\n' +
-        '/wager SYMBOL OPERATOR VALUE | YYYY-MM-DD HH:MM\n\n' +
-        'Example:\n' +
-        '/wager BTC > 100000 | 2025-12-31 00:00'
+      'I couldn\'t interpret that as a wager.\n\n' +
+        'Try something like:\n' +
+        '/wager BTC above 70000 in 2 hours\n' +
+        '/wager ETH under 3000 by tomorrow'
     );
+  } catch (err) {
+    console.error('LLM wager parsing failed:', err.message || err);
+    return ctx.reply('Sorry, I couldn\'t process that right now. Try the strict format: /wager BTC > 70000 | in 2 hours');
+  }
+});
+
+// Try the original strict "CONDITION | TIME" format — returns {success, condition, resolutionTime} or {error}
+function tryStrictParse(input, now, isDebug) {
+  const parts = input.split('|').map((s) => s.trim());
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    return { success: false };
   }
 
-  const condition = parseCondition(rawCondition);
-  if (!condition) {
-    return ctx.reply(
-      'Could not parse the condition.\n' +
-        'Use: SYMBOL OPERATOR VALUE\n' +
-        'Examples:\n' +
-        'BTC > 100000\n' +
-        'DIVI > 0.01\n' +
-        'ETH <= 2000\n\n' +
-        'Operators allowed: >, <, >=, <='
-    );
+  const condition = parseCondition(parts[0]);
+  if (!condition) return { success: false };
+
+  const resolutionTime = parseResolution(parts[1], now);
+  if (!resolutionTime || isNaN(resolutionTime.getTime())) return { success: false };
+
+  const diffMs = resolutionTime.getTime() - now.getTime();
+  const minResolutionMs = 10 * 60 * 1000;
+  if (!isDebug && diffMs < minResolutionMs) {
+    return { success: false, error: `Resolution time must be at least 10 minutes from now.` };
   }
 
-    // ---- resolution time parsing (absolute or relative) ----
-  const now = new Date(); // move this ABOVE parsing
+  return { success: true, condition, resolutionTime };
+}
 
-  const resolutionTime = parseResolution(rawResolution, now); // pass now in
+// Validate and convert LLM extraction result into condition + resolutionTime
+function validateLLMResult(result, now, isDebug) {
+  const { symbol, operator, threshold, resolution_time } = result;
+
+  if (!symbol || !operator || threshold == null || !resolution_time) {
+    return { error: 'Missing required wager fields. Please try again.' };
+  }
+
+  const assetId = SYMBOL_TO_ID[symbol];
+  if (!assetId) {
+    return { error: `Unsupported symbol: ${symbol}. Supported: ${Object.keys(SYMBOL_TO_ID).join(', ')}` };
+  }
+
+  // Parse resolution time — try relative ("2 hours"), then our strict format, then ISO timestamp
+  let resolutionTime = parseResolution(`in ${resolution_time}`, now);
   if (!resolutionTime || isNaN(resolutionTime.getTime())) {
-    return ctx.reply(
-      'Could not parse the resolution time.\n' +
-        'Use either:\n' +
-        '- Absolute UTC: YYYY-MM-DD HH:MM\n' +
-        '- Relative: in <number><unit>\n\n' +
-        'Examples:\n' +
-        '2025-12-31 00:00\n' +
-        'in 2 hours\n' +
-        'in 7 days\n' +
-        'in 90m'
-    );
+    resolutionTime = parseResolution(resolution_time, now);
+  }
+  if (!resolutionTime || isNaN(resolutionTime.getTime())) {
+    // Try parsing as ISO timestamp (e.g. "2026-03-25T07:31:03.442Z")
+    const isoAttempt = new Date(resolution_time);
+    if (!isNaN(isoAttempt.getTime())) {
+      resolutionTime = isoAttempt;
+    }
+  }
+  if (!resolutionTime || isNaN(resolutionTime.getTime())) {
+    return { error: `I couldn't understand the time "${resolution_time}". Try something like "in 2 hours" or "2026-03-25 14:00".` };
   }
 
   const diffMs = resolutionTime.getTime() - now.getTime();
-
-  // Enforce minimum 10 minutes from now (except in debug mode)
-  const minResolutionMs = 10 * 60 * 1000; // 10 minutes
+  const minResolutionMs = 10 * 60 * 1000;
   if (!isDebug && diffMs < minResolutionMs) {
-    const mins = Math.floor(diffMs / 60000);
-    return ctx.reply(
-      'Resolution time must be at least 10 minutes from now.\n' +
-        `You provided a time that is only about ${mins} minute(s) away.`
-    );
+    return { error: 'Resolution time must be at least 10 minutes from now.' };
   }
-  // ---- end resolution parsing ----
 
+  return {
+    condition: { assetSymbol: symbol, assetId, operator, threshold },
+    resolutionTime,
+  };
+}
 
+// ---- LLM-powered natural language wager parsing ----
+
+const WAGER_EXTRACT_TOOL = {
+  type: 'function',
+  function: {
+    name: 'extract_wager',
+    description: 'Extract structured wager parameters from natural language input.',
+    parameters: {
+      type: 'object',
+      properties: {
+        symbol: {
+          type: 'string',
+          enum: Object.keys(SYMBOL_TO_ID),
+          description: 'The cryptocurrency ticker symbol.',
+        },
+        operator: {
+          type: 'string',
+          enum: ['>', '<', '>=', '<='],
+          description: 'The comparison operator for the price condition.',
+        },
+        threshold: {
+          type: 'number',
+          description: 'The target price in USD.',
+        },
+        resolution_time: {
+          type: 'string',
+          description: 'When to check the price. Return as either a relative duration like "2 hours" or "30 minutes" or "3 days", OR an absolute UTC time like "2026-03-25 14:00". Always convert to UTC.',
+        },
+        confidence: {
+          type: 'string',
+          enum: ['complete', 'partial', 'unclear'],
+          description: '"complete" if all 4 fields are present and clear, "partial" if some are missing, "unclear" if the message is not a wager.',
+        },
+        missing_fields: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'List of fields that could not be determined.',
+        },
+        clarification_message: {
+          type: 'string',
+          description: 'A friendly question to ask the user for any missing information. Keep it short and conversational.',
+        },
+      },
+      required: ['confidence'],
+    },
+  },
+};
+
+const WAGER_SYSTEM_PROMPT = `You are a helper for a Telegram crypto wager bot. Users want to create price prediction wagers.
+
+Supported cryptocurrencies: BTC (Bitcoin), ETH (Ethereum), DIVI (Divi).
+Common aliases: "bitcoin" = BTC, "eth"/"ether"/"ethereum" = ETH, "divi" = DIVI.
+
+Operator mapping:
+- "above", "over", "more than", "higher than", "greater than" → ">"
+- "below", "under", "less than", "lower than" → "<"
+- "at least", "no less than", ">=" → ">="
+- "at most", "no more than", "<=" → "<="
+
+Time handling:
+- The current UTC time will be provided. Use it to resolve relative times like "tomorrow", "next friday", "in 2 hours".
+- Always return resolution_time in UTC.
+- "tomorrow 10am" with no timezone specified should be treated as UTC.
+- If a timezone is mentioned (e.g. "10am EST"), convert to UTC.
+
+Your job:
+1. Extract: symbol, operator, threshold (price), and resolution_time.
+2. If all 4 are clear, set confidence to "complete".
+3. If some are missing, set confidence to "partial" and write a short clarification_message asking for the missing info.
+4. If the message doesn't seem like a wager at all, set confidence to "unclear".
+
+Always call the extract_wager function with your best extraction.`;
+
+async function parseWagerWithLLM(messages) {
+  const response = await openai.chat.completions.create({
+    model: 'gpt-4o-mini',
+    messages: [
+      { role: 'system', content: WAGER_SYSTEM_PROMPT },
+      ...messages,
+    ],
+    tools: [WAGER_EXTRACT_TOOL],
+    tool_choice: { type: 'function', function: { name: 'extract_wager' } },
+    temperature: 0,
+  });
+
+  const toolCall = response.choices[0]?.message?.tool_calls?.[0];
+  if (!toolCall) return null;
+
+  try {
+    return JSON.parse(toolCall.function.arguments);
+  } catch {
+    return null;
+  }
+}
+
+// Shared wager creation logic — used by both strict parser and LLM parser
+async function createWager(ctx, condition, resolutionTime, now = new Date()) {
   // Voting window: 60 seconds from creation
   const voteDeadline = new Date(now.getTime() + 60 * 1000);
 
   // Simple unique ID for the wager
   const id = Date.now().toString();
 
+  const conditionText = `${condition.assetSymbol} ${condition.operator} ${condition.threshold}`;
+
   // Create wager in memory (with structured condition)
   const wager = {
     id,
-    text: rawCondition,
+    text: conditionText,
     assetSymbol: condition.assetSymbol,
     assetId: condition.assetId,
     operator: condition.operator,
     threshold: condition.threshold,
     yes: new Set(),
     no: new Set(),
-    participantNames: new Map(), // userId -> display name / @username
+    participantNames: new Map(),
     chatId: ctx.chat.id,
     messageId: null,
     createdAt: now,
@@ -638,11 +813,10 @@ bot.command('wager', async (ctx) => {
     countdownIntervalId: null,
     resolved: false,
     finalPrice: null,
-    outcomeYes: null, // true => YES wins, false => NO wins
+    outcomeYes: null,
   };
 
   wagers.set(id, wager);
-
 
   // ---- Persist wager to Postgres (best-effort) ----
   try {
@@ -651,7 +825,7 @@ bot.command('wager', async (ctx) => {
         id,
         chatId: String(ctx.chat.id),
         messageId: null,
-        text: rawCondition,
+        text: conditionText,
         assetSymbol: condition.assetSymbol,
         assetId: condition.assetId,
         operator: condition.operator,
@@ -668,7 +842,6 @@ bot.command('wager', async (ctx) => {
     console.error('Failed to persist wager to Postgres:', err.message || err);
   }
 
-
   // Send initial Telegram message
   const initialText = buildWagerText(wager, now);
 
@@ -682,10 +855,9 @@ bot.command('wager', async (ctx) => {
     ])
   );
 
-  // Store messageId in memory + JSON + DB
+  // Store messageId in memory + DB
   wager.messageId = message.message_id;
 
-  // ---- Update messageId in DB once we know it ----
   try {
     await prisma.wager.update({
       where: { id },
@@ -697,7 +869,7 @@ bot.command('wager', async (ctx) => {
 
   // Start the countdown updater for this wager
   startCountdown(wager);
-});
+}
 
 async function rebuildActiveWagersFromDb({ graceHours = 24 } = {}) {
   const now = new Date();
@@ -944,6 +1116,71 @@ bot.on('callback_query', async (ctx) => {
   // No message edit here – countdown loop will pick up new counts
   await ctx.answerCbQuery(`You joined ${side.toUpperCase()}`);
 });
+
+// ---- Follow-up handler for pending natural-language wagers ----
+bot.on('text', async (ctx) => {
+  // Only handle non-command messages from users with a pending wager conversation
+  const text = ctx.message.text || '';
+  if (text.startsWith('/')) return; // ignore commands
+
+  const pendingKey = `${ctx.chat.id}:${ctx.from.id}`;
+  const pending = pendingWagers.get(pendingKey);
+  if (!pending) return; // no pending conversation — ignore
+
+  const now = new Date();
+
+  // Limit follow-up attempts to prevent abuse
+  if (pending.attempts >= 3) {
+    pendingWagers.delete(pendingKey);
+    return ctx.reply(
+      'I\'m having trouble understanding. Let\'s start over.\n' +
+        'Try: /wager BTC > 70000 | in 2 hours'
+    );
+  }
+
+  try {
+    // Add the follow-up message to conversation history
+    pending.conversationHistory.push({ role: 'user', content: `Current UTC time: ${now.toISOString()}\n\n${text}` });
+    pending.attempts++;
+
+    const result = await parseWagerWithLLM(pending.conversationHistory);
+    if (!result) {
+      return ctx.reply('I still couldn\'t understand. Try: /wager BTC > 70000 | in 2 hours');
+    }
+
+    if (result.confidence === 'complete') {
+      pendingWagers.delete(pendingKey);
+      const validation = validateLLMResult(result, now, false);
+      if (validation.error) {
+        return ctx.reply(validation.error);
+      }
+      return await createWager(ctx, validation.condition, validation.resolutionTime, now);
+    }
+
+    if (result.confidence === 'partial') {
+      pending.partialData = result;
+      return ctx.reply(result.clarification_message || 'I still need more info. What coin, price target, and deadline?');
+    }
+
+    // unclear
+    pendingWagers.delete(pendingKey);
+    return ctx.reply('I couldn\'t interpret that as a wager. Try: /wager BTC > 70000 | in 2 hours');
+  } catch (err) {
+    console.error('LLM follow-up failed:', err.message || err);
+    pendingWagers.delete(pendingKey);
+    return ctx.reply('Something went wrong. Try: /wager BTC > 70000 | in 2 hours');
+  }
+});
+
+// Clean up stale pending wager conversations every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, pending] of pendingWagers.entries()) {
+    if (now - pending.createdAt.getTime() > 10 * 60 * 1000) {
+      pendingWagers.delete(key);
+    }
+  }
+}, 5 * 60 * 1000);
 
 /* ----------------- Auto-resolution loop ----------------- */
 
