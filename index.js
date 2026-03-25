@@ -577,6 +577,100 @@ bot.command('powerscore', (ctx) => {
   );
 });
 
+// Personal stats (DM only)
+bot.command('mystats', async (ctx) => {
+  if (ctx.chat.type !== 'private') {
+    return ctx.reply('/mystats is only available via DM.');
+  }
+
+  const userId = String(ctx.from.id);
+  const now = new Date();
+
+  try {
+    // 1. Leaderboard rankings across all chats
+    const scores = await prisma.leaderboardScore.findMany({
+      where: { userId, scope: 'all' },
+      orderBy: { powerScore: 'desc' },
+    });
+
+    let rankingText;
+    if (!scores.length) {
+      rankingText = 'No rankings yet. Join and resolve some wagers first!';
+    } else {
+      const lines = [];
+      for (const s of scores) {
+        // Find user's rank in that chat
+        const higher = await prisma.leaderboardScore.count({
+          where: { chatId: s.chatId, scope: 'all', monthKey: 'ALL', powerScore: { gt: s.powerScore } },
+        });
+        const rank = higher + 1;
+        const winRate = s.total > 0 ? ((s.wins / s.total) * 100).toFixed(0) : '0';
+        lines.push(`#${rank} — PS ${s.powerScore.toFixed(1)} | W:${s.wins} L:${s.losses} (${winRate}% win rate)`);
+      }
+      rankingText = lines.join('\n');
+    }
+
+    // 2. Pending/unresolved wagers the user has voted on
+    const pendingVotes = await prisma.wagerVote.findMany({
+      where: { userId },
+      include: {
+        wager: { where: { resolved: false } },
+      },
+    });
+    const pendingWagersList = pendingVotes
+      .filter(v => v.wager && !v.wager.resolved)
+      .map(v => {
+        const w = v.wager;
+        const timeLeft = formatRelative(w.resolutionTime, now);
+        return `${w.assetSymbol} ${w.operator} ${w.threshold} — you voted ${v.side.toUpperCase()} — resolves in ${timeLeft}`;
+      });
+
+    let pendingText;
+    if (!pendingWagersList.length) {
+      pendingText = 'No pending wagers.';
+    } else {
+      pendingText = pendingWagersList.join('\n');
+    }
+
+    // 3. Recent resolved wagers (last 25)
+    const recentVotes = await prisma.wagerVote.findMany({
+      where: { userId },
+      include: {
+        wager: { where: { resolved: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 50, // fetch extra since some may be unresolved
+    });
+    const resolvedHistory = recentVotes
+      .filter(v => v.wager && v.wager.resolved)
+      .slice(0, 25)
+      .map(v => {
+        const w = v.wager;
+        const won = (w.outcomeYes && v.side === 'yes') || (!w.outcomeYes && v.side === 'no');
+        const icon = won ? '✅' : '❌';
+        return `${icon} ${w.assetSymbol} ${w.operator} ${w.threshold} — voted ${v.side.toUpperCase()} — price: $${w.finalPrice}`;
+      });
+
+    let historyText;
+    if (!resolvedHistory.length) {
+      historyText = 'No resolved wagers yet.';
+    } else {
+      historyText = resolvedHistory.join('\n');
+    }
+
+    const reply =
+      `📊 Your Stats\n\n` +
+      `🏆 Rankings (all-time):\n${rankingText}\n\n` +
+      `⏳ Pending Wagers:\n${pendingText}\n\n` +
+      `📜 Recent History (last ${resolvedHistory.length || 0}):\n${historyText}`;
+
+    return ctx.reply(reply);
+  } catch (err) {
+    console.error('Failed to load mystats:', err.message || err);
+    return ctx.reply('Something went wrong loading your stats. Try again later.');
+  }
+});
+
 // Admin-only manual resolver trigger
 bot.command('debugresolve', async (ctx) => {
   if (ctx.from.id !== ADMIN_USER_ID) {
