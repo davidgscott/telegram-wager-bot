@@ -531,7 +531,18 @@ bot.command('leaderboard', async (ctx) => {
 });
 
 // WagerHelp Instructions
-bot.command('wagerhelp', (ctx) => {
+bot.command('wagerhelp', async (ctx) => {
+  // In group chats, redirect to DM and auto-delete the prompt
+  if (ctx.chat.type !== 'private') {
+    const msg = await ctx.reply('/wagerhelp is only available via DM with the bot. This message will self-destruct in 30 seconds.');
+    // Also try to delete the user's /wagerhelp command message
+    try { await ctx.deleteMessage(ctx.message.message_id); } catch {}
+    setTimeout(async () => {
+      try { await ctx.deleteMessage(msg.message_id); } catch {}
+    }, 30_000);
+    return;
+  }
+
   ctx.reply(
     'DIVI Wager Bot allows you to create friendly prediction wagers in Telegram groups.\n\n' +
     'Just describe your wager in plain language:\n' +
