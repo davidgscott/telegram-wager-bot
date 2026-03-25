@@ -909,14 +909,13 @@ Standard (check at deadline):
 - "at least", "no less than" → ">="
 - "at most", "no more than" → "<="
 
-Before-deadline (check every minute, resolve early if hit):
-- "above X before/by/at/on Y", "hits X by Y", "reaches X before Y" → ">?"
-- "below X before/by/at/on Y", "drops to X by Y" → "<?"
-- "at least X by/before/on Y" → ">=?"
-- "at most X by/before/on Y" → "<=?"
+Before-deadline (check every minute, resolve early if condition is hit):
+- "above X before Y", "hits X before Y" → ">?"
+- "below X before Y", "drops to X before Y" → "<?"
+- "at least X before Y" → ">=?"
+- "at most X before Y" → "<=?"
 
-Key distinction: if the user says "by", "before", "at", "on", "on or before", "by or before", "at or before" — these all imply ANYTIME before the deadline, so use the ? operators.
-If the user says "in 2 hours" or "at 2pm" with no "before/by" framing, use the standard operators (check once at that time).
+IMPORTANT: Only use the ? operators when the user explicitly says "before". Words like "by", "at", "on", "in" should use the STANDARD operators. The word "before" is the only trigger for early-resolution wagers.
 
 Time handling:
 - The current UTC time will be provided. Use it to resolve relative times like "tomorrow", "next friday", "in 2 hours".
