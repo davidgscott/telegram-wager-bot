@@ -277,11 +277,29 @@ function parseResolution(raw, now = new Date()) {
 }
 
 
+// "Before deadline" operators end with ? — check every tick, resolve early on hit
+function isBeforeDeadlineOp(op) {
+  return op.endsWith('?');
+}
+// Get the base comparison operator (strip the ?)
+function baseOp(op) {
+  return op.endsWith('?') ? op.slice(0, -1) : op;
+}
+// Human-readable operator label for display
+function operatorLabel(op) {
+  const labels = {
+    '>': 'above', '<': 'below', '>=': 'at or above', '<=': 'at or below',
+    '>?': 'above (anytime before deadline)', '<?': 'below (anytime before deadline)',
+    '>=?': 'at or above (anytime before deadline)', '<=?': 'at or below (anytime before deadline)',
+  };
+  return labels[op] || op;
+}
+
 // Parse "SYMBOL OPERATOR VALUE" into structured condition
 async function parseCondition(raw) {
   const trimmed = raw.trim();
-  // e.g. "BTC > 100000" or "DIVI <= 0.01"
-  const match = trimmed.match(/^([A-Za-z0-9]+)\s*(>=|<=|>|<)\s*([0-9]+(?:\.[0-9]+)?)$/);
+  // e.g. "BTC > 100000" or "DIVI <=? 0.01"
+  const match = trimmed.match(/^([A-Za-z0-9]+)\s*(>=\??|<=\??|>\??|<\??)\s*([0-9]+(?:\.[0-9]+)?)$/);
   if (!match) return null;
 
   const [, symbolRaw, operator, thresholdStr] = match;
@@ -295,8 +313,9 @@ async function parseCondition(raw) {
 }
 
 // Evaluate price against the condition, return true if YES should win
+// Before-deadline operators (>?, <?, etc) use the same comparison — timing is handled by the resolver
 function evaluateCondition(price, operator, threshold) {
-  switch (operator) {
+  switch (baseOp(operator)) {
     case '>':
       return price > threshold;
     case '<':
@@ -322,12 +341,13 @@ function buildWagerText(wager, now = new Date()) {
     statusLine = `Voting closes in ${remainingSeconds} second(s).`;
   }
 
-  const conditionLine = `Condition: ${wager.assetSymbol} ${wager.operator} ${wager.threshold} USD`;
+  const conditionLine = `Condition: ${wager.assetSymbol} ${operatorLabel(wager.operator)} $${wager.threshold}`;
+  const deadlineLabel = isBeforeDeadlineOp(wager.operator) ? 'Deadline' : 'Resolves';
 
   return (
     `Wager #${wager.id}\n` +
     `${conditionLine}\n\n` +
-    `Resolves: ${formatUtc(wager.resolutionTime)} (${formatRelative(wager.resolutionTime, now)})\n` +
+    `${deadlineLabel}: ${formatUtc(wager.resolutionTime)} (${formatRelative(wager.resolutionTime, now)})\n` +
     `Voting closes at: ${formatUtc(wager.voteDeadline)}\n\n` +
     `YES: ${wager.yes.size} user(s)\n` +
     `NO: ${wager.no.size} user(s)\n\n` +
@@ -337,7 +357,7 @@ function buildWagerText(wager, now = new Date()) {
 
 // Build text for a resolved wager
 function buildResolvedText(wager) {
-  const conditionLine = `Condition: ${wager.assetSymbol} ${wager.operator} ${wager.threshold} USD`;
+  const conditionLine = `Condition: ${wager.assetSymbol} ${operatorLabel(wager.operator)} $${wager.threshold}`;
   const winnerSide = wager.outcomeYes ? 'YES' : 'NO';
 
   const winnersText =
@@ -846,8 +866,8 @@ const WAGER_EXTRACT_TOOL = {
         },
         operator: {
           type: 'string',
-          enum: ['>', '<', '>=', '<='],
-          description: 'The comparison operator for the price condition.',
+          enum: ['>', '<', '>=', '<=', '>?', '<?', '>=?', '<=?'],
+          description: 'The comparison operator. Use >? <? >=? <=? when the user wants the condition checked anytime BEFORE a deadline (e.g. "hits 70k before Friday", "above 70k by tomorrow", "at 70k on or before Friday"). Use > < >= <= for standard at-deadline checks.',
         },
         threshold: {
           type: 'number',
@@ -883,10 +903,20 @@ Any cryptocurrency available on CoinGecko is supported. Use standard ticker symb
 Common aliases: "bitcoin" = BTC, "ethereum"/"ether" = ETH, "solana" = SOL, "dogecoin" = DOGE, etc.
 
 Operator mapping:
+Standard (check at deadline):
 - "above", "over", "more than", "higher than", "greater than" → ">"
 - "below", "under", "less than", "lower than" → "<"
-- "at least", "no less than", ">=" → ">="
-- "at most", "no more than", "<=" → "<="
+- "at least", "no less than" → ">="
+- "at most", "no more than" → "<="
+
+Before-deadline (check every minute, resolve early if hit):
+- "above X before/by/at/on Y", "hits X by Y", "reaches X before Y" → ">?"
+- "below X before/by/at/on Y", "drops to X by Y" → "<?"
+- "at least X by/before/on Y" → ">=?"
+- "at most X by/before/on Y" → "<=?"
+
+Key distinction: if the user says "by", "before", "at", "on", "on or before", "by or before", "at or before" — these all imply ANYTIME before the deadline, so use the ? operators.
+If the user says "in 2 hours" or "at 2pm" with no "before/by" framing, use the standard operators (check once at that time).
 
 Time handling:
 - The current UTC time will be provided. Use it to resolve relative times like "tomorrow", "next friday", "in 2 hours".
@@ -1325,38 +1355,58 @@ setInterval(() => {
 
 /* ----------------- Auto-resolution loop ----------------- */
 
-// Resolve wagers when resolutionTime has passed (DB-first)
+// Resolve wagers (DB-first)
+// Standard wagers: resolve at resolutionTime
+// Before-deadline wagers (operator ends with ?): check every tick, resolve early if condition met
 async function resolveDueWagers() {
   const now = new Date();
   console.log('Resolver tick at', now.toISOString());
 
-  let dueWagers;
+  let unresolvedWagers;
   try {
-    dueWagers = await prisma.wager.findMany({
-      where: {
-        resolved: false,
-        resolutionTime: { lte: now },
-      },
-      include: {
-        votes: true,
-      },
+    unresolvedWagers = await prisma.wager.findMany({
+      where: { resolved: false },
+      include: { votes: true },
     });
   } catch (err) {
-    console.error('Failed to load due wagers from Postgres:', err.message || err);
+    console.error('Failed to load wagers from Postgres:', err.message || err);
     return;
   }
 
-  if (!dueWagers.length) {
-    console.log('No due unresolved wagers found.');
-    return;
-  }
+  // Split into: standard wagers past deadline, and before-deadline wagers to check now
+  const toResolve = []; // will hold { dbW, forceOutcome? } objects
 
-  for (const dbW of dueWagers) {
-    if (!dbW.assetId) {
-      console.log('Skipping wager (no assetId):', dbW.id);
-      continue;
+  for (const dbW of unresolvedWagers) {
+    if (!dbW.assetId) continue;
+
+    if (isBeforeDeadlineOp(dbW.operator)) {
+      // Before-deadline: check every tick (but only after voting closes)
+      if (now >= dbW.voteDeadline) {
+        if (now >= dbW.resolutionTime) {
+          // Deadline passed without hitting — NO wins
+          toResolve.push({ dbW, forceOutcome: false });
+        } else {
+          // Still active — check price now
+          toResolve.push({ dbW, checkEarly: true });
+        }
+      }
+    } else {
+      // Standard wager: only resolve once deadline passes
+      if (now >= dbW.resolutionTime) {
+        toResolve.push({ dbW });
+      }
     }
+  }
 
+  if (!toResolve.length) {
+    console.log('No wagers to process.');
+    return;
+  }
+
+  // Group by assetId to batch price lookups
+  const priceCache = new Map();
+
+  for (const { dbW, forceOutcome, checkEarly } of toResolve) {
     const chatId = Number(dbW.chatId) || dbW.chatId;
 
     // Rebuild yes/no sets and participant names from DB votes
@@ -1367,24 +1417,41 @@ async function resolveDueWagers() {
     for (const v of dbW.votes) {
       const userIdNum = Number(v.userId);
       const uid = Number.isNaN(userIdNum) ? v.userId : userIdNum;
-
       if (v.side === 'yes') yesSet.add(uid);
       else if (v.side === 'no') noSet.add(uid);
-
-      if (v.name) {
-        participantNames.set(uid, v.name);
-      }
+      if (v.name) participantNames.set(uid, v.name);
     }
 
     try {
-      console.log('Attempting to resolve wager', dbW.id, 'for', dbW.assetSymbol);
+      // Get price (cached per assetId per tick)
+      if (!priceCache.has(dbW.assetId)) {
+        const price = await getCurrentPriceUsd(dbW.assetId);
+        priceCache.set(dbW.assetId, price);
+        console.log('Got price for', dbW.assetSymbol, ':', price);
+      }
+      const price = priceCache.get(dbW.assetId);
 
-      const price = await getCurrentPriceUsd(dbW.assetId);
-      console.log('Got price for', dbW.assetSymbol, ':', price);
+      let yesWins;
+      if (forceOutcome !== undefined) {
+        // Deadline passed on before-deadline wager — condition was never met
+        yesWins = forceOutcome;
+        console.log('Before-deadline wager', dbW.id, 'expired — NO wins');
+      } else if (checkEarly) {
+        // Before-deadline wager still active — check if condition is met now
+        const conditionMet = evaluateCondition(price, dbW.operator, dbW.threshold);
+        if (!conditionMet) {
+          // Not hit yet — skip, check again next tick
+          continue;
+        }
+        yesWins = true;
+        console.log('Before-deadline wager', dbW.id, 'hit early! YES wins at', price);
+      } else {
+        // Standard wager — evaluate at deadline
+        yesWins = evaluateCondition(price, dbW.operator, dbW.threshold);
+        console.log('Resolving standard wager', dbW.id, 'for', dbW.assetSymbol);
+      }
 
-      const yesWins = evaluateCondition(price, dbW.operator, dbW.threshold);
-
-      // Use in-memory wager if present, otherwise a local object
+      // Use in-memory wager if present, otherwise build a local object
       const memWager = wagers.get(dbW.id);
       const wager = memWager || {
         id: dbW.id,
@@ -1409,7 +1476,7 @@ async function resolveDueWagers() {
         losers: [],
       };
 
-      // Sync core fields from DB/votes into whichever object we use
+      // Sync core fields
       wager.yes = yesSet;
       wager.no = noSet;
       wager.participantNames = participantNames;
@@ -1424,15 +1491,13 @@ async function resolveDueWagers() {
         memWager.resolved = true;
         memWager.finalPrice = price;
         memWager.outcomeYes = yesWins;
-
-        // Stop any countdown that might still be running
         if (memWager.countdownIntervalId) {
           clearInterval(memWager.countdownIntervalId);
           memWager.countdownIntervalId = null;
         }
       }
 
-      // Build winners/losers lists for display
+      // Build winners/losers lists
       const winnersSet = yesWins ? yesSet : noSet;
       const losersSet  = yesWins ? noSet  : yesSet;
 
@@ -1440,13 +1505,10 @@ async function resolveDueWagers() {
         const name = participantNames.get(uid) || `User ${uid}`;
         return `🏆 ${name}`;
       });
-
       wager.losers = [...losersSet].map((uid) => {
         const name = participantNames.get(uid) || `User ${uid}`;
         return `😞 ${name}`;
       });
-
-      // Sort alphabetically for stable output
       wager.winners.sort((a, b) => a.localeCompare(b));
       wager.losers.sort((a, b) => a.localeCompare(b));
 
@@ -1455,139 +1517,55 @@ async function resolveDueWagers() {
       const allTimeScores = getAllTimeScores(chatId);
       const monthlyScores = getMonthlyScores(chatId, monthKey);
 
-      // Winners: +10 in-memory, +1 win in DB
       for (const uid of winnersSet) {
         const name = participantNames.get(uid) || `User ${uid}`;
-
-        // in-memory scoring (keeps /leaderboard working)
         addPointsToScores(allTimeScores, uid, name, 10);
         addPointsToScores(monthlyScores, uid, name, 10);
-
-        // all-time row
-        await updateLeaderboardRow({
-          chatId,
-          userId: uid,
-          name,
-          scope: 'all',
-          monthKey: null,
-          winDelta: 1,
-          lossDelta: 0,
-        });
-
-        // monthly row
-        await updateLeaderboardRow({
-          chatId,
-          userId: uid,
-          name,
-          scope: 'month',
-          monthKey,
-          winDelta: 1,
-          lossDelta: 0,
-        });
+        await updateLeaderboardRow({ chatId, userId: uid, name, scope: 'all', monthKey: null, winDelta: 1, lossDelta: 0 });
+        await updateLeaderboardRow({ chatId, userId: uid, name, scope: 'month', monthKey, winDelta: 1, lossDelta: 0 });
       }
 
-      // Losers: +0 in-memory, +1 loss in DB
       for (const uid of losersSet) {
         const name = participantNames.get(uid) || `User ${uid}`;
-
-        // still keep them in the in-memory table
         addPointsToScores(allTimeScores, uid, name, 0);
         addPointsToScores(monthlyScores, uid, name, 0);
-
-        // all-time row
-        await updateLeaderboardRow({
-          chatId,
-          userId: uid,
-          name,
-          scope: 'all',
-          monthKey: null,
-          winDelta: 0,
-          lossDelta: 1,
-        });
-
-        // monthly row
-        await updateLeaderboardRow({
-          chatId,
-          userId: uid,
-          name,
-          scope: 'month',
-          monthKey,
-          winDelta: 0,
-          lossDelta: 1,
-        });
+        await updateLeaderboardRow({ chatId, userId: uid, name, scope: 'all', monthKey: null, winDelta: 0, lossDelta: 1 });
+        await updateLeaderboardRow({ chatId, userId: uid, name, scope: 'month', monthKey, winDelta: 0, lossDelta: 1 });
       }
-      // ---- end scoring ----
 
       const resultText = buildResolvedText(wager);
 
-      // ---- Persist resolution to Postgres (best-effort) ----
+      // Persist resolution to Postgres
       try {
         await prisma.wager.update({
           where: { id: dbW.id },
-          data: {
-            resolved: true,
-            finalPrice: price,
-            outcomeYes: yesWins,
-          },
+          data: { resolved: true, finalPrice: price, outcomeYes: yesWins },
         });
       } catch (err) {
-        console.error(
-          'Failed to persist wager resolution to Postgres:',
-          err.message || err
-        );
+        console.error('Failed to persist wager resolution:', err.message || err);
       }
 
-      // First try to edit the original wager message (if we know messageId)
+      // Edit original message or send new one
       let edited = false;
       if (dbW.messageId != null) {
         try {
-          console.log(
-            'Editing original message',
-            'chatId:',
-            chatId,
-            'messageId:',
-            dbW.messageId
-          );
-
-          await bot.telegram.editMessageText(
-            chatId,
-            dbW.messageId,
-            undefined,
-            resultText,
-            {
-              reply_markup: {
-                inline_keyboard: [], // remove YES/NO buttons
-              },
-            }
-          );
-
+          await bot.telegram.editMessageText(chatId, dbW.messageId, undefined, resultText, {
+            reply_markup: { inline_keyboard: [] },
+          });
           edited = true;
-          console.log('Successfully edited original message for wager', dbW.id);
+          console.log('Edited message for wager', dbW.id);
         } catch (editErr) {
-          console.error(
-            'Failed to edit original message for wager',
-            dbW.id,
-            editErr.description || editErr.message
-          );
+          console.error('Failed to edit message for wager', dbW.id, editErr.description || editErr.message);
         }
       }
-
-      // Fallback: if edit failed or we had no messageId, send a new resolution message
       if (!edited) {
-        await bot.telegram.sendMessage(
-          chatId,
-          `Wager #${dbW.id} resolved.\n\n` + resultText
-        );
-        console.log('Sent separate resolution message for wager', dbW.id);
+        await bot.telegram.sendMessage(chatId, `Wager #${dbW.id} resolved.\n\n` + resultText);
+        console.log('Sent resolution message for wager', dbW.id);
       }
 
       console.log('Resolved wager', dbW.id, 'YES wins?', yesWins);
     } catch (err) {
-      console.error(
-        'Failed to resolve wager',
-        dbW.id,
-        err.message || err
-      );
+      console.error('Failed to resolve wager', dbW.id, err.message || err);
     }
   }
 }
