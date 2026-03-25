@@ -6,23 +6,22 @@ import fsSync from 'fs';
 import { PrismaClient } from '@prisma/client';
 import OpenAI from 'openai';
 
-// ---- Prevent accidental double-run ----
+// ---- Prevent accidental double-run (local dev only) ----
+// In cloud environments, single-instance is enforced by the platform.
+const IS_CLOUD = !!(process.env.RAILWAY_ENVIRONMENT || process.env.RENDER || process.env.FLY_APP_NAME);
 
-const LOCK_FILE = './bot.lock';
+if (!IS_CLOUD) {
+  const LOCK_FILE = './bot.lock';
 
-// If a stale lock exists from a crash, check if pid is alive
-if (fsSync.existsSync(LOCK_FILE)) {
-  const pid = Number(fsSync.readFileSync(LOCK_FILE, 'utf8').trim());
-  try {
-    process.kill(pid, 0); // will throw if not running
-  } catch {
-    // Process is not running → stale lock
-    fsSync.unlinkSync(LOCK_FILE);
+  if (fsSync.existsSync(LOCK_FILE)) {
+    const pid = Number(fsSync.readFileSync(LOCK_FILE, 'utf8').trim());
+    try {
+      process.kill(pid, 0); // will throw if not running
+    } catch {
+      fsSync.unlinkSync(LOCK_FILE);
+    }
   }
-}
 
-
-function acquireLock() {
   try {
     fsSync.writeFileSync(LOCK_FILE, String(process.pid), { flag: 'wx' });
     process.on('exit', () => {
@@ -33,10 +32,6 @@ function acquireLock() {
     process.exit(1);
   }
 }
-
-
-
-acquireLock();
 
 const prisma = new PrismaClient();
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
