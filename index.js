@@ -977,8 +977,10 @@ async function parseWagerWithLLM(messages) {
 
 // Shared wager creation logic — used by both strict parser and LLM parser
 async function createWager(ctx, condition, resolutionTime, now = new Date()) {
-  // Voting window: 60 seconds from creation
-  const voteDeadline = new Date(now.getTime() + 60 * 1000);
+  // Voting window: 10% of time to resolution, min 60s, max 24h
+  const timeToResolutionMs = resolutionTime.getTime() - now.getTime();
+  const votingWindowMs = Math.min(Math.max(timeToResolutionMs * 0.1, 60_000), 24 * 60 * 60_000);
+  const voteDeadline = new Date(now.getTime() + votingWindowMs);
 
   // Simple unique ID for the wager
   const id = Date.now().toString();
