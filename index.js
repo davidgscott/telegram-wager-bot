@@ -760,7 +760,7 @@ bot.command('wager', async (ctx) => {
 
     if (result.confidence === 'complete') {
       // Validate the extracted fields
-      const validation = await validateLLMResult(result, now, isDebug);
+      const validation = await validateLLMResult(result, now, isDebug, cleanedInput);
       if (validation.error) {
         return ctx.reply(validation.error);
       }
@@ -814,8 +814,15 @@ async function tryStrictParse(input, now, isDebug) {
 }
 
 // Validate and convert LLM extraction result into condition + resolutionTime
-async function validateLLMResult(result, now, isDebug) {
-  const { symbol, operator, threshold, resolution_time } = result;
+// rawInput: optional user text — if it contains "before", force the ? operator suffix
+async function validateLLMResult(result, now, isDebug, rawInput = '') {
+  const { symbol, threshold, resolution_time } = result;
+  let { operator } = result;
+
+  // If user said "before" or "on or before" but LLM didn't use a ? operator, fix it
+  if (rawInput && /\bbefore\b/i.test(rawInput) && operator && !operator.endsWith('?')) {
+    operator = operator + '?';
+  }
 
   if (!symbol || !operator || threshold == null || !resolution_time) {
     return { error: 'Missing required wager fields. Please try again.' };
@@ -1334,7 +1341,7 @@ bot.on('text', async (ctx) => {
 
     if (result.confidence === 'complete') {
       pendingWagers.delete(pendingKey);
-      const validation = await validateLLMResult(result, now, false);
+      const validation = await validateLLMResult(result, now, false, text);
       if (validation.error) {
         return ctx.reply(validation.error);
       }
