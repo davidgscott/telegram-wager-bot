@@ -920,7 +920,16 @@ Before-deadline (check every minute, resolve early if condition is hit):
 - "at least X before Y" → ">=?"
 - "at most X before Y" → "<=?"
 
-IMPORTANT: Only use the ? operators when the user explicitly says "before". Words like "by", "at", "on", "in" should use the STANDARD operators. The word "before" is the only trigger for early-resolution wagers.
+IMPORTANT: Only use the ? operators when the user explicitly says "before" as a TIME qualifier.
+- "before" in a TIME context (e.g. "before tomorrow", "before 2pm", "on or before Friday") → use ? operator
+- "before" is the ONLY word that triggers ? operators. "by", "at", "on", "in" use STANDARD operators.
+
+CRITICAL: "on or before" is a TIME phrase meaning "anytime before the deadline" → use ? operator.
+Do NOT confuse time qualifiers with price qualifiers:
+- "below 70000" = price condition (operator <)
+- "before tomorrow" = time condition (adds ? to the operator)
+- "below 70000 on or before tomorrow" = operator "<?" with resolution_time "tomorrow"
+- "below 70000 by tomorrow" = operator "<" with resolution_time "tomorrow"
 
 Time handling:
 - The current UTC time will be provided. Use it to resolve relative times like "tomorrow", "next friday", "in 2 hours".
