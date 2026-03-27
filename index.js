@@ -1323,7 +1323,7 @@ bot.on('callback_query', async (ctx) => {
 
 
   // No message edit here – countdown loop will pick up new counts
-  await ctx.answerCbQuery(`You joined ${side.toUpperCase()}`);
+  await ctx.answerCbQuery(`You voted ${side.toUpperCase()}`);
 });
 
 // ---- Follow-up handler for pending natural-language wagers ----
