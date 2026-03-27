@@ -598,7 +598,9 @@ bot.command('wagerhelp', async (ctx) => {
       'Tip: Type /leaderboard to see the top winners 🐐\n' +
       '🏆 Rankings are based on win rate and total wagers — consistency matters.\n\n' +
       '📬 The bot will DM you your results when a wager you voted on resolves. ' +
-      'To receive DMs, you must start a conversation with the bot first (send /start in a DM).';
+      'To receive DMs, you must start a conversation with the bot first (send /start in a DM).\n\n' +
+      '📊 Type /mystats in any group chat to get your personal stats sent via DM — ' +
+      'including your rankings, pending wagers, and recent win/loss history.';
 
   if (ctx.chat.type === 'private') {
     return ctx.reply(helpText);
