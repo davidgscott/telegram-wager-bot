@@ -1591,6 +1591,24 @@ async function resolveDueWagers() {
         console.log('Sent resolution message for wager', dbW.id);
       }
 
+      // DM each voter with their personal outcome
+      for (const v of dbW.votes) {
+        const won = (yesWins && v.side === 'yes') || (!yesWins && v.side === 'no');
+        const icon = won ? '🏆' : '😞';
+        const outcome = won ? 'You won!' : 'You lost.';
+        const personalMsg =
+          `${icon} Wager #${dbW.id} resolved!\n\n` +
+          `${dbW.assetSymbol} ${operatorLabel(dbW.operator)} $${dbW.threshold}\n` +
+          `Final price: $${price}\n` +
+          `You voted: ${v.side.toUpperCase()}\n` +
+          `${outcome}`;
+        try {
+          await bot.telegram.sendMessage(Number(v.userId), personalMsg);
+        } catch {
+          // User hasn't started a DM with the bot — silently skip
+        }
+      }
+
       console.log('Resolved wager', dbW.id, 'YES wins?', yesWins);
     } catch (err) {
       console.error('Failed to resolve wager', dbW.id, err.message || err);
