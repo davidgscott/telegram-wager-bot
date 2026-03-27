@@ -821,7 +821,7 @@ async function tryStrictParse(input, now, isDebug) {
   if (!resolutionTime || isNaN(resolutionTime.getTime())) return { success: false };
 
   const diffMs = resolutionTime.getTime() - now.getTime();
-  const minResolutionMs = 5 * 60 * 1000;
+  const minResolutionMs = 5 * 60 * 1000 - 3000; // 3s buffer for processing time
   if (!isDebug && diffMs < minResolutionMs) {
     return { success: false, error: `Resolution time must be at least 5 minutes from now.` };
   }
@@ -867,7 +867,7 @@ async function validateLLMResult(result, now, isDebug, rawInput = '') {
   }
 
   const diffMs = resolutionTime.getTime() - now.getTime();
-  const minResolutionMs = 5 * 60 * 1000;
+  const minResolutionMs = 5 * 60 * 1000 - 3000; // 3s buffer for processing time
   if (!isDebug && diffMs < minResolutionMs) {
     return { error: 'Resolution time must be at least 5 minutes from now.' };
   }
