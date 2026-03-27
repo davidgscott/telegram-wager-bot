@@ -579,11 +579,7 @@ bot.command('leaderboard', async (ctx) => {
 
 // WagerHelp Instructions
 bot.command('wagerhelp', async (ctx) => {
-  if (ctx.chat.type !== 'private') {
-    return ctx.reply('/wagerhelp is only available via DM.');
-  }
-
-  ctx.reply(
+  const helpText =
     'DIVI Wager Bot allows you to create friendly prediction wagers in Telegram groups.\n\n' +
     'Just describe your wager in plain language:\n' +
       '/wager BTC above 70000 in 2 hours\n' +
@@ -602,8 +598,18 @@ bot.command('wagerhelp', async (ctx) => {
       'Tip: Type /leaderboard to see the top winners 🐐\n' +
       '🏆 Rankings are based on win rate and total wagers — consistency matters.\n\n' +
       '📬 The bot will DM you your results when a wager you voted on resolves. ' +
-      'To receive DMs, you must start a conversation with the bot first (send /start in a DM).'
-  );
+      'To receive DMs, you must start a conversation with the bot first (send /start in a DM).';
+
+  if (ctx.chat.type === 'private') {
+    return ctx.reply(helpText);
+  }
+
+  try {
+    await bot.telegram.sendMessage(ctx.from.id, helpText);
+    return ctx.reply('Help sent to your DM!');
+  } catch {
+    return ctx.reply('I couldn\'t DM you. Please start a chat with me first, then try again.');
+  }
 });
 
 bot.command('powerscore', (ctx) => {
