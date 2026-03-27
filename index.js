@@ -337,8 +337,14 @@ function buildWagerText(wager, now = new Date()) {
   if (remainingMs <= 0) {
     statusLine = 'Voting is CLOSED.';
   } else {
-    const remainingSeconds = Math.ceil(remainingMs / 1000);
-    statusLine = `Voting closes in ${remainingSeconds} second(s).`;
+    const totalSecs = Math.ceil(remainingMs / 1000);
+    const h = Math.floor(totalSecs / 3600);
+    const m = Math.floor((totalSecs % 3600) / 60);
+    const s = totalSecs % 60;
+    const timeStr = h > 0
+      ? `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+      : `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    statusLine = `Voting closes in ${timeStr}`;
   }
 
   const conditionLine = `Condition: ${wager.assetSymbol} ${operatorLabel(wager.operator)} $${wager.threshold}`;
