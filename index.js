@@ -600,7 +600,9 @@ bot.command('wagerhelp', async (ctx) => {
       '• Voting stays open for 60 seconds after creation\n' +
       '• Winners and losers are displayed automatically at resolution\n\n' +
       'Tip: Type /leaderboard to see the top winners 🐐\n' +
-      '🏆 Rankings are based on win rate and total wagers — consistency matters.'
+      '🏆 Rankings are based on win rate and total wagers — consistency matters.\n\n' +
+      '📬 The bot will DM you your results when a wager you voted on resolves. ' +
+      'To receive DMs, you must start a conversation with the bot first (send /start in a DM).'
   );
 });
 
