@@ -253,8 +253,8 @@ function parseResolution(raw, now = new Date()) {
     ));
   }
 
-  // ----- 2) Relative pattern: "in 2 hours", "in 90m", "in 3 days" -----
-  const rel = trimmed.match(/^in\s+(\d+)\s*(hours?|hrs?|h|minutes?|mins?|m|days?|d)$/i);
+  // ----- 2) Relative pattern: "in 2 hours", "in 90m", "2min", "3 days" -----
+  const rel = trimmed.match(/^(?:in\s+)?(\d+)\s*(hours?|hrs?|h|minutes?|mins?|m|days?|d)$/i);
   if (rel) {
     const amount = Number(rel[1]);
     const unit = rel[2].toLowerCase();
