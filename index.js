@@ -1554,24 +1554,31 @@ async function resolveDueWagers() {
       wager.losers.sort((a, b) => a.localeCompare(b));
 
       // ---- Leaderboard scoring ----
-      const monthKey = getMonthKey(dbW.resolutionTime);
-      const allTimeScores = getAllTimeScores(chatId);
-      const monthlyScores = getMonthlyScores(chatId, monthKey);
+      // Only count wins/losses if both sides have at least one voter
+      const bothSidesVoted = yesSet.size > 0 && noSet.size > 0;
 
-      for (const uid of winnersSet) {
-        const name = participantNames.get(uid) || `User ${uid}`;
-        addPointsToScores(allTimeScores, uid, name, 10);
-        addPointsToScores(monthlyScores, uid, name, 10);
-        await updateLeaderboardRow({ chatId, userId: uid, name, scope: 'all', monthKey: null, winDelta: 1, lossDelta: 0 });
-        await updateLeaderboardRow({ chatId, userId: uid, name, scope: 'month', monthKey, winDelta: 1, lossDelta: 0 });
-      }
+      if (bothSidesVoted) {
+        const monthKey = getMonthKey(dbW.resolutionTime);
+        const allTimeScores = getAllTimeScores(chatId);
+        const monthlyScores = getMonthlyScores(chatId, monthKey);
 
-      for (const uid of losersSet) {
-        const name = participantNames.get(uid) || `User ${uid}`;
-        addPointsToScores(allTimeScores, uid, name, 0);
-        addPointsToScores(monthlyScores, uid, name, 0);
-        await updateLeaderboardRow({ chatId, userId: uid, name, scope: 'all', monthKey: null, winDelta: 0, lossDelta: 1 });
-        await updateLeaderboardRow({ chatId, userId: uid, name, scope: 'month', monthKey, winDelta: 0, lossDelta: 1 });
+        for (const uid of winnersSet) {
+          const name = participantNames.get(uid) || `User ${uid}`;
+          addPointsToScores(allTimeScores, uid, name, 10);
+          addPointsToScores(monthlyScores, uid, name, 10);
+          await updateLeaderboardRow({ chatId, userId: uid, name, scope: 'all', monthKey: null, winDelta: 1, lossDelta: 0 });
+          await updateLeaderboardRow({ chatId, userId: uid, name, scope: 'month', monthKey, winDelta: 1, lossDelta: 0 });
+        }
+
+        for (const uid of losersSet) {
+          const name = participantNames.get(uid) || `User ${uid}`;
+          addPointsToScores(allTimeScores, uid, name, 0);
+          addPointsToScores(monthlyScores, uid, name, 0);
+          await updateLeaderboardRow({ chatId, userId: uid, name, scope: 'all', monthKey: null, winDelta: 0, lossDelta: 1 });
+          await updateLeaderboardRow({ chatId, userId: uid, name, scope: 'month', monthKey, winDelta: 0, lossDelta: 1 });
+        }
+      } else {
+        console.log('Wager', dbW.id, 'resolved but not scored — only one side had voters.');
       }
 
       const resultText = buildResolvedText(wager);
