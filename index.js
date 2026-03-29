@@ -840,6 +840,8 @@ async function validateLLMResult(result, now, isDebug, rawInput = '') {
     operator = operator + '?';
   }
 
+  console.log('LLM result:', JSON.stringify(result));
+
   if (!symbol || !operator || threshold == null || !resolution_time) {
     return { error: 'Missing required wager fields. Please try again.' };
   }
@@ -868,6 +870,7 @@ async function validateLLMResult(result, now, isDebug, rawInput = '') {
 
   const diffMs = resolutionTime.getTime() - now.getTime();
   const minResolutionMs = 5 * 60 * 1000 - 3000; // 3s buffer for processing time
+  console.log('LLM time check:', { resolution_time, parsedTime: resolutionTime?.toISOString(), now: now.toISOString(), diffMs, minResolutionMs });
   if (!isDebug && diffMs < minResolutionMs) {
     return { error: 'Resolution time must be at least 5 minutes from now.' };
   }
