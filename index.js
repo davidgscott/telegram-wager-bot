@@ -958,10 +958,10 @@ Do NOT confuse time qualifiers with price qualifiers:
 - "below 70000 by tomorrow" = operator "<" with resolution_time "tomorrow"
 
 Time handling:
-- The current UTC time will be provided. Use it to resolve relative times like "tomorrow", "next friday", "in 2 hours".
-- Always return resolution_time in UTC.
-- "tomorrow 10am" with no timezone specified should be treated as UTC.
+- IMPORTANT: For relative times like "in 1 hour", "in 30 minutes", "in 2 days", ALWAYS return the duration as-is (e.g. "1 hour", "30 minutes", "2 days"). Do NOT convert to an absolute timestamp.
+- Only return an absolute timestamp (e.g. "2026-03-30 14:00") when the user specifies an absolute time like "tomorrow at 2pm" or "March 30 at noon".
 - If a timezone is mentioned (e.g. "10am EST"), convert to UTC.
+- "tomorrow 10am" with no timezone specified should be treated as UTC.
 
 Your job:
 1. Extract: symbol, operator, threshold (price), and resolution_time.
